@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from identity_resolution import IdentityResolver
 from temporal_state import TemporalEvent, observation_is_eligible, reconstruct_state, normalize_timestamp
+from deletion_policy import DeletionPolicy, PolicyDecision, record_policy_category
 
 OUTPUT_FIELDS = ["case_id", "deletion_status", "steps_json"]
 STEP_FIELDS = ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]
@@ -64,6 +65,16 @@ def request_authorizes_deletion(text: str)->bool:
         return False
     return positive
 
+def validate_policy_inputs(dataset: Path, rules: list[dict[str, str]]) -> None:
+    """Fail fast on malformed or duplicate policy definitions from the supplied dataset."""
+    from deletion_policy import PolicyError
+    policy_path = dataset / "deletion_rules.csv"
+    policy = DeletionPolicy.from_csv(policy_path)
+    # Ensure the pre-loaded table and separately validated decision engine agree.
+    if len(policy.rules) != len(rules):
+        raise InputError(f"{policy_path}: rule count changed during validation")
+
+
 def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]:
     requests=read_csv(requests_file or (dataset/"deletion_requests.csv"),["case_id","email","requested_at","reported_status","reported_at","audit_at","request_text"])
     identities=read_csv(dataset/"user_identities.csv",["user_id","name","email","phone","email_hash","updated_at"])
@@ -71,6 +82,8 @@ def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]
     activity=read_csv(dataset/"system_activity.csv",["activity_id","event_time","event_type","source_system","target_system","resource_id","reported_result","details"])
     rules=read_csv(dataset/"deletion_rules.csv",["rule_id","data_category","condition","required_action"])
     manifest=read_csv(dataset/"evidence_files.csv",["file_id","file_path","origin","captured_at"])
+    # Policy structure is validated as part of input loading before any audit begins.
+    validate_policy_inputs(dataset, rules)
     ids=set()
     for r in requests:
         if not r["case_id"].strip() or r["case_id"] in ids: raise InputError(f"Empty or duplicate case_id: {r['case_id']!r}")
@@ -325,7 +338,105 @@ def _resource_observation_time(record: dict[str, Any], captured_at: datetime) ->
     return normalize_timestamp(captured_at)
 
 
-def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None)->list[Resource]:
+def _policy_truth(value: Any) -> bool:
+    """Interpret explicit boolean-like policy facts without relying on another module's internals."""
+    return value is True or str(value).strip().casefold() in {"1", "true", "yes", "active", "enabled"}
+
+
+def _policy_context(record: Mapping[str, Any], category: str, capture_path: str = "") -> dict[str, Any]:
+    """Derive only explicit facts needed by policy conditions; do not infer missing truth."""
+    fields = {str(k).casefold(): v for k, v in record.items()}
+    text = " ".join(str(v) for v in fields.values()).casefold()
+    context: dict[str, Any] = {}
+    legal_signal = any(token in text or token in capture_path.casefold() for token in
+                       ("legal_hold_active", "legal hold active", "active legal hold", "hold_status=active"))
+    if legal_signal:
+        context["legal_hold_active"] = True
+    if any(key in fields for key in ("legal_hold_active", "active_legal_hold", "has_active_legal_hold")):
+        raw = next(fields[k] for k in ("legal_hold_active", "active_legal_hold", "has_active_legal_hold") if k in fields)
+        context["legal_hold_active"] = _norm_id(raw) in {"true", "1", "yes", "active", "enabled"}
+    retained_marker = "retention" in text or "retain_until" in fields or "retention_until" in fields
+    if "within_retention_period" in fields:
+        context["within_retention_period"] = _norm_id(fields["within_retention_period"]) in {"true", "1", "yes"}
+    elif any(key in fields for key in ("retention_active", "must_retain")):
+        raw = fields.get("retention_active", fields.get("must_retain"))
+        context["within_retention_period"] = _norm_id(raw) in {"true", "1", "yes", "active"}
+    elif retained_marker:
+        # Mere words like "retention" are not proof that the retention period is active.
+        if any(token in text for token in ("within retention period", "retention period active", "retain_until active")):
+            context["within_retention_period"] = True
+    if category == "SUPPORT_MESSAGE":
+        shared = any(token in text for token in ("shared customer", "shared agent", "shared order", "must be retained", "shared_context_must_be_retained"))
+        if shared:
+            context["shared_context_must_be_retained"] = True
+        elif "shared_context_must_be_retained" in fields:
+            context["shared_context_must_be_retained"] = _norm_id(fields["shared_context_must_be_retained"]) in {"true", "1", "yes"}
+    if category == "SUPPORT_ATTACHMENT":
+        for key in ("belongs_only_to_subject", "attachment_belongs_only_to_subject", "subject_only"):
+            if key in fields:
+                context["belongs_only_to_subject"] = _norm_id(fields[key]) in {"true", "1", "yes"}
+                break
+    if category in {"ANALYTICS_PROFILE", "PRODUCT_TELEMETRY"}:
+        if any(k in fields for k in ("still_attributable", "attributable_to_user")):
+            raw = fields.get("still_attributable", fields.get("attributable_to_user"))
+            context["still_attributable"] = _norm_id(raw) in {"true", "1", "yes"}
+        else:
+            direct = any(_norm_id(fields.get(k)) for k in ("email", "display_email", "old_email", "new_email", "phone", "email_hash", "name", "full_name", "display_name"))
+            user_ref = any(_norm_id(fields.get(k)) for k in ("user_id", "subject_reference", "customer_id", "account_user_id"))
+            if direct:
+                context["still_attributable"] = True
+            elif "anonymized" in text or "anonymized=true" in text or "attribution_removed" in text:
+                context["still_attributable"] = False
+            elif user_ref:
+                # Stable internal user_id alone is allowed for tombstone relationships,
+                # but this generic context does not assert direct attribution.
+                context["still_attributable"] = False
+    if category == "EMAIL_DELIVERY_LOG":
+        context["contains_user_email"] = any(_norm_id(fields.get(k)) for k in ("email", "recipient_email", "user_email", "customer_email"))
+    if category == "BACKUP_ARCHIVE":
+        if any(k in fields for k in ("restore_access_can_be_blocked", "restore_block_supported", "can_block_restore")):
+            raw = next(fields[k] for k in ("restore_access_can_be_blocked", "restore_block_supported", "can_block_restore") if k in fields)
+            context["restore_access_can_be_blocked"] = _norm_id(raw) in {"true", "1", "yes"}
+    if category == "ACCOUNT_TOMBSTONE":
+        deleted_keys = ("account_deleted", "deleted_account", "deletion_confirmed")
+        stable_keys = ("stable_user_id_required", "stable_reference_required", "retained_record_references")
+        if any(key in fields for key in deleted_keys):
+            context["account_deleted"] = any(_policy_truth(fields[key]) for key in deleted_keys if key in fields)
+        elif any(token in text for token in ("account_deleted=true", "deletion_confirmed=true", "deleted_account=true", "account is deleted")):
+            context["account_deleted"] = True
+        if any(key in fields for key in stable_keys):
+            context["stable_user_id_required"] = any(_policy_truth(fields[key]) for key in stable_keys if key in fields)
+        elif any(token in text for token in ("stable_user_id_required=true", "stable reference required", "preserve references to retained records")):
+            context["stable_user_id_required"] = True
+        # Direct identifiers must be checked against real values, not just field names.
+        context["direct_identifiers"] = {
+            key: str(fields.get(key, "")).strip()
+            for key in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash")
+            if _norm_id(fields.get(key))
+        }
+        context["stable_user_id"] = str(fields.get("user_id") or fields.get("subject_reference") or "").strip()
+    return context
+
+
+def evaluate_record_policy(record: Mapping[str, Any], path: str, store: str,
+                           resource_id: str, policy: DeletionPolicy) -> PolicyDecision:
+    category = record_policy_category(path, store, "", resource_id)
+    context = _policy_context(record, category, path)
+    # A direct-identifier-free tombstone is safe to retain only if an internal stable
+    # reference exists and the policy condition is otherwise met.
+    decision = policy.decide(category, context)
+    if category == "ACCOUNT_TOMBSTONE":
+        direct = context.get("direct_identifiers", {})
+        stable = context.get("stable_user_id", "")
+        if decision.action == "REDACT" and (direct or not stable):
+            return PolicyDecision(category, "UNRESOLVED", decision.rule_ids, decision.matched_rules,
+                                  decision.diagnostics + ("TOMBSTONE_REDACTION_REQUIRED",),
+                                  "Tombstone must retain only stable user_id; direct identifiers remain or no stable reference exists.", False)
+    return decision
+
+
+def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None,policy_path:Path|None=None)->list[Resource]:
+    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
     found: dict[tuple[str, str, str], Resource] = {}
     found_order: dict[tuple[str, str, str], tuple[datetime, str]] = {}
     temporal_events: dict[tuple[str, str], list[TemporalEvent]] = {}
@@ -352,16 +463,26 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     if not rid:
                         continue
                     category = _resource_category(path, store, collection, rid)
+                    policy_decision = evaluate_record_policy(rec, path, store, rid, policy) if policy is not None else None
                     fields = {str(k).casefold(): v for k, v in rec.items()}
-                    direct = any(_norm_id(fields.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name", "full_name"))
+                    direct = any(_norm_id(fields.get(k)) for k in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash"))
                     # Search exports often wrap the hit in a query object and repeat
                     # the resource ID on the parent. A nested document's exact subject
                     # match must classify the parent resource, not only the child.
-                    if category == "retained":
-                        # Policy-retained audit/security records are not residual deletion failures.
+                    # Keep raw evidence facts separate from policy treatment. Unresolved
+                    # legal/retention rules are surfaced as conservative findings when data
+                    # remains; RETAIN never generates a deletion remediation.
+                    if policy_decision is not None and policy_decision.action == "RETAIN":
                         continue
-                    if category == "tombstone":
+                    if category == "retained":
+                        if policy_decision is not None and policy_decision.action == "UNRESOLVED":
+                            op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("system_id") or store or infer_system(path, rid))
+                        else:
+                            continue
+                    elif category == "tombstone":
                         if direct:
+                            op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
+                        elif policy_decision is not None and policy_decision.action == "UNRESOLVED":
                             op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
                         else:
                             continue
@@ -396,10 +517,18 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                                 ))
                             continue
                     elif category == "analytics":
+                        if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                            continue
                         op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "analytics_platform")
                     elif category == "support":
+                        if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                            continue
                         op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "support_platform")
                     else:
+                        if policy_decision is not None and policy_decision.action in {"NOT_APPLICABLE", "UNRESOLVED"}:
+                            # A matching subject without an applicable policy is not
+                            # silently converted to a destructive finding.
+                            continue
                         op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("data_store") or store or infer_system(path, rid))
                     key = (sysid, rid, op)
                     observed_at = _resource_observation_time(rec, hit.captured_at)
@@ -466,14 +595,22 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 if not rid:
                     continue
                 category = _resource_category(path, table, table, rid)
-                if category == "retained":
+                policy_decision = evaluate_record_policy(rec, path, table, rid, policy) if policy is not None else None
+                if policy_decision is not None and policy_decision.action == "RETAIN":
                     continue
-                if category == "tombstone":
-                    direct = any(_norm_id(rec.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name"))
-                    if not direct:
+                if category == "retained":
+                    if policy_decision is not None and policy_decision.action == "UNRESOLVED":
+                        op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", infer_system(path, rid)
+                    else:
+                        continue
+                elif category == "tombstone":
+                    direct = any(_norm_id(rec.get(k)) for k in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash"))
+                    if not direct and (policy_decision is None or policy_decision.action != "UNRESOLVED"):
                         continue
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
                 elif category == "analytics":
+                    if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                        continue
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "analytics_platform"
                 elif category == "flow":
                     sysid = infer_system(path, rid)
@@ -584,11 +721,34 @@ def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)-
     if phase=="FINDING" and not evidence: raise InputError("Finding must cite evidence")
     return s
 
-def build_plan(resources:list[Resource])->list[dict[str,Any]]:
+def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[str,Any]]:
     unique=[]; seen=set()
     for r in sorted(resources,key=lambda x:(OP_ORDER.get(x.operation,99),x.system_id,x.resource_id)):
         k=(r.system_id,r.resource_id,r.operation)
         if k not in seen: seen.add(k); unique.append(r)
+    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
+    if policy is not None:
+        filtered = []
+        for resource in unique:
+            category = record_policy_category("", resource.system_id, "", resource.resource_id)
+            # Evaluate the actual resource class. If the conditional protection rule is
+            # unresolved, keep the conservative FINDING but never propose DELETE.
+            if category in {"SECURITY_AUDIT_LOG", "LEGAL_HOLD_RECORD", "BACKUP_ARCHIVE"}:
+                context: dict[str, Any] = {}
+                if category == "SECURITY_AUDIT_LOG":
+                    # A generic audit-record label alone does not prove retention is active.
+                    context = {"within_retention_period": True} if "retained" in resource.operation.casefold() else {}
+                if category == "LEGAL_HOLD_RECORD":
+                    # Active-hold context must come from explicit evidence, never category alone.
+                    context = {}
+                decision = policy.decide(category, context)
+                if decision.action == "RETAIN":
+                    continue
+                if decision.action == "UNRESOLVED":
+                    # Exclude from this destructive plan until policy facts are resolved.
+                    continue
+            filtered.append(resource)
+        unique = filtered
     steps=[]
     for r in unique: steps.append(make_step(len(steps)+1,"FINDING",r.system_id,r.resource_id,r.operation,r.state,r.evidence_id))
     rem=[]; ver=[]
@@ -612,7 +772,7 @@ def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[s
     # Resource-specific evidence files provide the evidence-linked findings.
     return []
 
-def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache:list[EvidenceHit])->tuple[str,list[dict[str,Any]]]:
+def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache:list[EvidenceHit],policy_path:Path|None=None)->tuple[str,list[dict[str,Any]]]:
     cutoff = parse_time(case["audit_at"])
     if not request_authorizes_deletion(case["request_text"]):
         return "NOT_APPLICABLE", []
@@ -624,9 +784,9 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
 
     tokens = subject_tokens(users, aliases, data["identities"], data["audit"], cutoff)
     hits = [h for h in evidence_cache if h.captured_at <= cutoff]
-    resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff)
+    resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff, policy_path=policy_path)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
-    plan = build_plan(resources)
+    plan = build_plan(resources, policy_path=policy_path)
 
     # A clean result requires explicit negative-state evidence for the account and
     # any policy-relevant retained resources. The positive-evidence scanner does not
@@ -675,10 +835,11 @@ def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,An
         for doc in evidence_index.documents.values() if doc.status=="INDEXED"
     ]
     evidence_cache.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
+    policy_path = dataset / "deletion_rules.csv"
     for case in data["requests"]:
         cutoff=parse_time(case["audit_at"])
         case_evidence=[hit for hit in evidence_cache if hit.captured_at<=cutoff]
-        status,steps=audit_case(case,data,dataset,case_evidence)
+        status,steps=audit_case(case,data,dataset,case_evidence,policy_path=policy_path)
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
     valid_ids=evidence_index.manifest_ids()
     activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}
@@ -702,6 +863,6 @@ def main()->int:
         data=load_inputs(args.dataset,args.requests)
         if args.validate_only: print(json.dumps({"valid":True,"requests":len(data["requests"]),"identities":len(data["identities"]),"audit_rows":len(data["audit"]),"activity_rows":len(data["activity"]),"evidence_manifest_rows":len(data["manifest"])}))
         else: print(json.dumps(generate(args.dataset,args.output,args.requests),ensure_ascii=False))
-    except (InputError,OSError) as e: print(f"ghosttrace: error: {e}",file=sys.stderr); return 2
+    except (InputError,OSError,ValueError) as e: print(f"ghosttrace: error: {e}",file=sys.stderr); return 2
     return 0
 if __name__=="__main__": raise SystemExit(main())

@@ -393,8 +393,16 @@ def _policy_context(record: Mapping[str, Any], category: str, capture_path: str 
             raw = next(fields[k] for k in ("restore_access_can_be_blocked", "restore_block_supported", "can_block_restore") if k in fields)
             context["restore_access_can_be_blocked"] = _norm_id(raw) in {"true", "1", "yes"}
     if category == "ACCOUNT_TOMBSTONE":
-        context["account_deleted"] = any(token in text for token in ("account_deleted=true", "deletion_confirmed=true", "deleted_account=true", "account is deleted"))
-        context["stable_user_id_required"] = any(token in text for token in ("stable_user_id_required=true", "stable reference required", "preserve references to retained records"))
+        deleted_keys = ("account_deleted", "deleted_account", "deletion_confirmed")
+        stable_keys = ("stable_user_id_required", "stable_reference_required", "retained_record_references")
+        if any(key in fields for key in deleted_keys):
+            context["account_deleted"] = any(_truth(fields[key]) for key in deleted_keys if key in fields)
+        elif any(token in text for token in ("account_deleted=true", "deletion_confirmed=true", "deleted_account=true", "account is deleted")):
+            context["account_deleted"] = True
+        if any(key in fields for key in stable_keys):
+            context["stable_user_id_required"] = any(_truth(fields[key]) for key in stable_keys if key in fields)
+        elif any(token in text for token in ("stable_user_id_required=true", "stable reference required", "preserve references to retained records")):
+            context["stable_user_id_required"] = True
         # Direct identifiers must be checked against real values, not just field names.
         context["direct_identifiers"] = {
             key: str(fields.get(key, "")).strip()

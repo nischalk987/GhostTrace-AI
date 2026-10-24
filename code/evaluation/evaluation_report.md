@@ -1,10 +1,8 @@
 # Evaluation report
 
-## Regression evaluation
+## Running the regression checks
 
-The sample set is the provided reference output (`dataset/sample_output.csv`). The current rules-based implementation has **not** been claimed as canonically accurate until a complete sample run is executed against the bundled dataset. Metrics must be produced by running the evaluator, not estimated manually.
-
-Run from the repository root:
+From the repository root:
 
 ```bash
 python -m unittest discover -s code -p "test_*.py" -v
@@ -12,18 +10,24 @@ python code/evaluate.py --dataset dataset --sample-only
 python code/main.py --validate-only
 ```
 
-The evaluator reports case/status accuracy, exact step-array accuracy, step-field accuracy, and sequence accuracy. It returns a failure code if the sample output differs from the reference output.
+The evaluator compares generated output on the 32 sample requests with `dataset/sample_output.csv` and prints:
+- case-level deletion status accuracy;
+- exact ordered `steps_json` array accuracy;
+- step/field accuracy; and
+- phase/operation sequence accuracy.
+
+Do not treat schema validation as proof of canonical accuracy. Run the evaluator and preserve its actual metrics with the submission.
 
 ## Additional regression cases
 
-1. **Historical identifier cutoff:** an email change after `audit_at` must not add the future alias to the subject.
-2. **Future evidence cutoff:** a manifest item whose `captured_at` is after `audit_at` must not be used.
-3. **Explicit no-deletion intent:** an export/download request must be `NOT_APPLICABLE` and have `steps_json=[]`.
-4. **Shared support conversation:** preserve a shared conversation under policy and remediate identifying fields instead of deleting the entire record.
-5. **Tombstone exposure:** a deleted-account tombstone with name, email, phone, or email hash still populated must produce a PII finding.
+1. A historical email change after `audit_at` must not add a future alias.
+2. An evidence manifest entry captured after `audit_at` must be excluded.
+3. An export/download request must return `NOT_APPLICABLE` and `[]`.
+4. A support conversation shared with another customer must be retained and redacted according to the supplied rule.
+5. A tombstone with direct identifiers populated must produce an exposed-PII finding.
 
-## Limitations
+## Current limitations
 
-- PDF and screenshot evidence still requires OCR or a separately tested extraction adapter. No unverified OCR result is treated as fact.
-- Retention/legal-hold documents need a subject-specific policy extraction step before they can drive a retained-record decision.
-- The engine conservatively avoids asserting `COMPLETE` from the absence of a positive finding alone.
+- Screenshot/PDF evidence needs OCR with validation against the source; unsupported claims are not inferred.
+- Legal-hold and retention evidence requires subject-specific extraction and rule application.
+- The engine does not assert `COMPLETE` from an empty findings list alone.

@@ -85,6 +85,23 @@ class EvidenceIndexTests(unittest.TestCase):
                 (f.file_id, f.field_name, f.value, f.source_line, f.source_row) for f in index.query_resource("search_1")
             )))
 
+    def test_sql_cannot_attach_external_databases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_dataset(temp)
+            external = Path(temp) / "outside.db"
+            external.write_text("must remain unchanged", encoding="utf-8")
+            sql_file = root / "evidence" / "databases" / "unsafe.sql"
+            sql_file.write_text(
+                "ATTACH DATABASE '" + str(external).replace("'", "''") + "' AS outside; "
+                "CREATE TABLE local_data (email TEXT); INSERT INTO local_data VALUES ('a@example.com');",
+                encoding="utf-8")
+            manifest_path = root / "evidence_files.csv"
+            with manifest_path.open("a", encoding="utf-8") as handle:
+                handle.write("ev8,evidence/databases/unsafe.sql,sql,2026-01-06T00:00:00Z\\n")
+            index = EvidenceIndex(root).build()
+            self.assertIn("SQL_PARSE_ERROR", {d.code for d in index.diagnostics})
+            self.assertEqual(external.read_text(encoding="utf-8"), "must remain unchanged")
+
     def test_manifest_ids_are_used_for_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             index = EvidenceIndex(self.make_dataset(temp)).build()

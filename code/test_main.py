@@ -24,6 +24,19 @@ class EngineRegressionTests(unittest.TestCase):
         self.assertIn("new@example.com", aliases)
         self.assertNotIn("future@example.com", aliases)
 
+    def test_ambiguous_reused_email_does_not_mix_subjects(self):
+        identities = [
+            {"user_id":"u1","name":"A","email":"current1@example.com","phone":"","email_hash":"","updated_at":"2026-01-01T00:00:00Z"},
+            {"user_id":"u2","name":"B","email":"current2@example.com","phone":"","email_hash":"","updated_at":"2026-01-01T00:00:00Z"},
+        ]
+        audit = [
+            {"audit_id":"a1","user_id":"u1","field_name":"email","old_value":"shared@example.com","new_value":"current1@example.com","event_time":"2025-01-01T00:00:00Z"},
+            {"audit_id":"a2","user_id":"u2","field_name":"email","old_value":"shared@example.com","new_value":"current2@example.com","event_time":"2025-02-01T00:00:00Z"},
+        ]
+        users, aliases = identity_aliases("shared@example.com", identities, audit, parse_time("2026-03-01T00:00:00Z"))
+        self.assertEqual(users, set())
+        self.assertEqual(aliases, set())
+
     def test_evidence_after_cutoff_is_excluded(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

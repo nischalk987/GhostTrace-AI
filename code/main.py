@@ -410,7 +410,7 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
             if cutoff is not None:
                 # Text logs commonly encode timestamp=... or event_time=...; malformed
                 # explicit timestamps are not silently treated as current state.
-                temporal_fields = dict(re.findall(r"(?i)(event_time|event_timestamp|occurred_at|effective_at|status_at|observed_at|timestamp)\\s*[=:]\\s*([^,;| ]+)", line))
+                temporal_fields = dict(re.findall(r"(?i)(event_time|event_timestamp|occurred_at|effective_at|status_at|observed_at|timestamp)\s*[=:]\s*([^,;| ]+)", line))
                 if temporal_fields:
                     eligible, _temporal_reason = observation_is_eligible(temporal_fields, captured_at=hit.captured_at, audit_at=cutoff)
                     if not eligible:

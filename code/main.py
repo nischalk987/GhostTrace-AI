@@ -23,9 +23,9 @@ OP_ORDER={"REPORT_REMAINING_RECORD":0,"REPORT_EXPOSED_PII":1,"REPORT_ACTIVE_DATA
 "DISABLE_DATA_FLOW":0,"BLOCK_RESTORE":1,"DELETE_RECORD":2,"REDACT_RECORD":3,"ANONYMIZE_RECORD":4,
 "VERIFY_RECORD_ABSENT":0,"VERIFY_RECORD_PRESENT":1,"VERIFY_RECORD_REDACTED":2,"VERIFY_RECORD_ANONYMIZED":3,
 "VERIFY_DATA_FLOW_DISABLED":4,"VERIFY_RESTORE_BLOCKED":5}
-NEGATION_RE=re.compile(r"\b(?:do not|don't|dont|never|not|without)\b.{0,45}\b(?:delete|deletion|erase|erasure|remove|removal|close|closure|account)\b",re.I)
+NEGATION_RE=re.compile(r"\b(?:do not|don't|dont|never)\s+(?:please\s+)?(?:delete|erase|remove|close|wipe|cancel)\b|\b(?:do not|don't|dont)\s+(?:want|need|wish)\s+(?:you\s+to\s+)?(?:delete|erase|remove|close|wipe)\b",re.I)
 NON_DELETE_RE=re.compile(r"\b(?:access|export|download|correct|correction|update|rectify|marketing opt[- ]?out|unsubscribe|stop marketing|change my email)\b",re.I)
-DELETE_RE=re.compile(r"\b(?:delet(?:e|ion|ing)|eras(?:e|ure|ing)|remov(?:e|al|ing)|close(?:d|ing)?\s+(?:my\s+)?account|permanent(?:ly)?\s+(?:account\s+)?deletion|wipe)\b",re.I)
+DELETE_RE=re.compile(r"\b(?:delet(?:e|ed|es|ing|ion|ions)|eras(?:e|ed|es|ing|ure)|remov(?:e|ed|es|ing|al)|clos(?:e|ed|es|ing)|wip(?:e|ed|ing)|expung(?:e|ed|ing)|eliminat(?:e|ed|ion|ing)|supprim(?:e|er|ée|ission)|effac(?:e|er|ement)|borr(?:a|ar|ado|ada)|exclu(?:ir|são|sion)|apagar|verwijder(?:en|ing)|entfern(?:en|ung)|löschen|loeschen|cancell(?:are|azione|ed)|削除|消去|退会|删除|刪除|注销|注銷|삭제|탈퇴)\b|\bclose\s+(?:(?:my|the|this|an)\s+)?account\b|\b(?:account|profile|personal data|personal information)\b.{0,80}\b(?:gone|deleted|removed|erased|closed|wiped)\b",re.I)
 
 class InputError(ValueError): pass
 
@@ -49,10 +49,18 @@ def normalize(value: str|None)->str: return (value or "").strip().casefold()
 
 def request_authorizes_deletion(text: str)->bool:
     s=text.strip()
-    if not s or NEGATION_RE.search(s): return False
-    if NON_DELETE_RE.search(s) and not DELETE_RE.search(s): return False
-    if re.search(r"(?i)\b(?:supprim|elimin|exclus|exclusão|elimina|borrar|eliminar|cancelar|삭제|消除|削除|删除)\w*",s): return True
-    return bool(DELETE_RE.search(s))
+    if not s:
+        return False
+    # Only treat a direct negation of the deletion verb as non-consent. For example,
+    # "do not treat a similar search record as mine" is still a deletion audit request.
+    if NEGATION_RE.search(s):
+        return False
+    positive = bool(DELETE_RE.search(s)) or bool(re.search(
+        r"(?i)(suppression|supprimer|effacer|elimin|exclus|exclusão|borrar|eliminar|apagar|削除|消去|退会|删除|刪除|注销|注銷|삭제|탈퇴|delete|erase|remove|close|deletion|erasure|account.{0,60}gone|profile.{0,60}gone)",
+        s))
+    if NON_DELETE_RE.search(s) and not positive:
+        return False
+    return positive
 
 def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]:
     requests=read_csv(requests_file or (dataset/"deletion_requests.csv"),["case_id","email","requested_at","reported_status","reported_at","audit_at","request_text"])

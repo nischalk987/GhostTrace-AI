@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from identity_resolution import IdentityResolver
 from temporal_state import TemporalEvent, observation_is_eligible, reconstruct_state, normalize_timestamp
+from deletion_policy import DeletionPolicy, PolicyDecision, record_policy_category
 
 OUTPUT_FIELDS = ["case_id", "deletion_status", "steps_json"]
 STEP_FIELDS = ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]
@@ -71,6 +72,8 @@ def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]
     activity=read_csv(dataset/"system_activity.csv",["activity_id","event_time","event_type","source_system","target_system","resource_id","reported_result","details"])
     rules=read_csv(dataset/"deletion_rules.csv",["rule_id","data_category","condition","required_action"])
     manifest=read_csv(dataset/"evidence_files.csv",["file_id","file_path","origin","captured_at"])
+    # Policy structure is validated as part of input loading before any audit begins.
+    DeletionPolicy.from_csv(dataset/"deletion_rules.csv")
     ids=set()
     for r in requests:
         if not r["case_id"].strip() or r["case_id"] in ids: raise InputError(f"Empty or duplicate case_id: {r['case_id']!r}")
@@ -323,6 +326,90 @@ def _resource_observation_time(record: dict[str, Any], captured_at: datetime) ->
         if raw is not None and str(raw).strip():
             return normalize_timestamp(str(raw))
     return normalize_timestamp(captured_at)
+
+
+def _policy_context(record: Mapping[str, Any], category: str, capture_path: str = "") -> dict[str, Any]:
+    """Derive only explicit facts needed by policy conditions; do not infer missing truth."""
+    fields = {str(k).casefold(): v for k, v in record.items()}
+    text = " ".join(str(v) for v in fields.values()).casefold()
+    context: dict[str, Any] = {}
+    legal_signal = any(token in text or token in capture_path.casefold() for token in
+                       ("legal_hold_active", "legal hold active", "active legal hold", "hold_status=active"))
+    if legal_signal:
+        context["legal_hold_active"] = True
+    if any(key in fields for key in ("legal_hold_active", "active_legal_hold", "has_active_legal_hold")):
+        raw = next(fields[k] for k in ("legal_hold_active", "active_legal_hold", "has_active_legal_hold") if k in fields)
+        context["legal_hold_active"] = _norm_id(raw) in {"true", "1", "yes", "active", "enabled"}
+    retained_marker = "retention" in text or "retain_until" in fields or "retention_until" in fields
+    if "within_retention_period" in fields:
+        context["within_retention_period"] = _norm_id(fields["within_retention_period"]) in {"true", "1", "yes"}
+    elif any(key in fields for key in ("retention_active", "must_retain")):
+        raw = fields.get("retention_active", fields.get("must_retain"))
+        context["within_retention_period"] = _norm_id(raw) in {"true", "1", "yes", "active"}
+    elif retained_marker:
+        # Mere words like "retention" are not proof that the retention period is active.
+        if any(token in text for token in ("within retention period", "retention period active", "retain_until active")):
+            context["within_retention_period"] = True
+    if category == "SUPPORT_MESSAGE":
+        shared = any(token in text for token in ("shared customer", "shared agent", "shared order", "must be retained", "shared_context_must_be_retained"))
+        if shared:
+            context["shared_context_must_be_retained"] = True
+        elif "shared_context_must_be_retained" in fields:
+            context["shared_context_must_be_retained"] = _norm_id(fields["shared_context_must_be_retained"]) in {"true", "1", "yes"}
+    if category == "SUPPORT_ATTACHMENT":
+        for key in ("belongs_only_to_subject", "attachment_belongs_only_to_subject", "subject_only"):
+            if key in fields:
+                context["belongs_only_to_subject"] = _norm_id(fields[key]) in {"true", "1", "yes"}
+                break
+    if category in {"ANALYTICS_PROFILE", "PRODUCT_TELEMETRY"}:
+        if any(k in fields for k in ("still_attributable", "attributable_to_user")):
+            raw = fields.get("still_attributable", fields.get("attributable_to_user"))
+            context["still_attributable"] = _norm_id(raw) in {"true", "1", "yes"}
+        else:
+            direct = any(_norm_id(fields.get(k)) for k in ("email", "display_email", "old_email", "new_email", "phone", "email_hash", "name", "full_name", "display_name"))
+            user_ref = any(_norm_id(fields.get(k)) for k in ("user_id", "subject_reference", "customer_id", "account_user_id"))
+            if direct:
+                context["still_attributable"] = True
+            elif "anonymized" in text or "anonymized=true" in text or "attribution_removed" in text:
+                context["still_attributable"] = False
+            elif user_ref:
+                # Stable internal user_id alone is allowed for tombstone relationships,
+                # but this generic context does not assert direct attribution.
+                context["still_attributable"] = False
+    if category == "EMAIL_DELIVERY_LOG":
+        context["contains_user_email"] = any(_norm_id(fields.get(k)) for k in ("email", "recipient_email", "user_email", "customer_email"))
+    if category == "BACKUP_ARCHIVE":
+        if any(k in fields for k in ("restore_access_can_be_blocked", "restore_block_supported", "can_block_restore")):
+            raw = next(fields[k] for k in ("restore_access_can_be_blocked", "restore_block_supported", "can_block_restore") if k in fields)
+            context["restore_access_can_be_blocked"] = _norm_id(raw) in {"true", "1", "yes"}
+    if category == "ACCOUNT_TOMBSTONE":
+        context["account_deleted"] = any(token in text for token in ("account_deleted=true", "deletion_confirmed=true", "deleted_account=true", "account is deleted"))
+        context["stable_user_id_required"] = any(token in text for token in ("stable_user_id_required=true", "stable reference required", "preserve references to retained records"))
+        # Direct identifiers must be checked against real values, not just field names.
+        context["direct_identifiers"] = {
+            key: str(fields.get(key, "")).strip()
+            for key in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash")
+            if _norm_id(fields.get(key))
+        }
+        context["stable_user_id"] = str(fields.get("user_id") or fields.get("subject_reference") or "").strip()
+    return context
+
+
+def evaluate_record_policy(record: Mapping[str, Any], path: str, store: str,
+                           resource_id: str, policy: DeletionPolicy) -> PolicyDecision:
+    category = record_policy_category(path, store, "", resource_id)
+    context = _policy_context(record, category, path)
+    # A direct-identifier-free tombstone is safe to retain only if an internal stable
+    # reference exists and the policy condition is otherwise met.
+    decision = policy.decide(category, context)
+    if category == "ACCOUNT_TOMBSTONE":
+        direct = context.get("direct_identifiers", {})
+        stable = context.get("stable_user_id", "")
+        if decision.action == "REDACT" and (direct or not stable):
+            return PolicyDecision(category, "UNRESOLVED", decision.rule_ids, decision.matched_rules,
+                                  decision.diagnostics + ("TOMBSTONE_REDACTION_REQUIRED",),
+                                  "Tombstone must retain only stable user_id; direct identifiers remain or no stable reference exists.", False)
+    return decision
 
 
 def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None)->list[Resource]:

@@ -494,16 +494,34 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
 
 def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
     data=load_inputs(dataset,requests_file); results=[]
-    max_cutoff=max(parse_time(r["audit_at"]) for r in data["requests"])
-    evidence_cache=read_evidence(dataset,data["manifest"],max_cutoff)
+    # Index all manifest evidence exactly once, independent of per-case cutoffs.
+    evidence_index=EvidenceIndex(dataset).build()
+    for diagnostic in evidence_index.diagnostics:
+        print(f"[evidence:{diagnostic.code}] {diagnostic.file_id} {diagnostic.path}: {diagnostic.message}", file=sys.stderr)
+    evidence_cache=[
+        EvidenceHit(doc.file_id,doc.file_path,doc.captured_at,doc.text)
+        for doc in evidence_index.documents.values() if doc.status=="INDEXED"
+    ]
+    evidence_cache.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
     for case in data["requests"]:
-        status,steps=audit_case(case,data,dataset,evidence_cache)
+        cutoff=parse_time(case["audit_at"])
+        case_evidence=[hit for hit in evidence_cache if hit.captured_at<=cutoff]
+        status,steps=audit_case(case,data,dataset,case_evidence)
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
+    valid_ids=evidence_index.manifest_ids()
+    activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}
+    for row in results:
+        if row["steps_json"]=="[]":
+            continue
+        for step in json.loads(row["steps_json"]):
+            if step["phase"]=="FINDING" and step["evidence_id"] not in valid_ids|activity_ids:
+                raise InputError(f"Finding cites unknown evidence ID {step['evidence_id']!r} in {row['case_id']}")
     results.sort(key=lambda r:r["case_id"]); validate_output(results,{r["case_id"] for r in data["requests"]})
     output.parent.mkdir(parents=True,exist_ok=True)
     with output.open("w",encoding="utf-8",newline="") as f:
         writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\n"); writer.writeheader(); writer.writerows(results)
-    return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output)}
+    return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output),
+            "evidence_index":evidence_index.stats()}
 
 
 def main()->int:

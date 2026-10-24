@@ -93,7 +93,7 @@ class Resource:
     evidence_id:str
 
 def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None=None)->list[EvidenceHit]:
-    """Compatibility API using manifest rows; production generate() uses one shared index."""
+    """Legacy reader for unit callers; production generate() reuses one EvidenceIndex."""
     hits=[]
     root=dataset.resolve()
     for entry in manifest:
@@ -101,8 +101,11 @@ def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None
         if cutoff is not None and captured>cutoff:
             continue
         raw=entry["file_path"].replace("\\","/")
-        parts=[p for p in raw.split("/") if p not in {"",".","dataset"}]
-        if not parts or parts[0]!="evidence" or any(p==".." for p in raw.split("/")):
+        pieces=raw.split("/")
+        if any(part==".." for part in pieces):
+            continue
+        parts=[part for part in pieces if part not in {"",".","dataset"}]
+        if not parts or parts[0]!="evidence":
             continue
         path=(root/Path(*parts)).resolve()
         try:
@@ -506,7 +509,6 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
 
 def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
     data=load_inputs(dataset,requests_file); results=[]
-    # Index all manifest evidence exactly once, independent of per-case cutoffs.
     evidence_index=EvidenceIndex(dataset).build()
     for diagnostic in evidence_index.diagnostics:
         print(f"[evidence:{diagnostic.code}] {diagnostic.file_id} {diagnostic.path}: {diagnostic.message}", file=sys.stderr)
@@ -523,8 +525,6 @@ def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,An
     valid_ids=evidence_index.manifest_ids()
     activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}
     for row in results:
-        if row["steps_json"]=="[]":
-            continue
         for step in json.loads(row["steps_json"]):
             if step["phase"]=="FINDING" and step["evidence_id"] not in valid_ids|activity_ids:
                 raise InputError(f"Finding cites unknown evidence ID {step['evidence_id']!r} in {row['case_id']}")

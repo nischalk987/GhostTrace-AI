@@ -345,55 +345,42 @@ def build_plan(resources:list[Resource])->list[dict[str,Any]]:
 
 def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[str], aliases: set[str], cutoff: datetime) -> list[Resource]:
     out: dict[tuple[str, str, str], Resource] = {}
-    events = data.get("activity", [])
-    # Only events for explicit subject identifiers count. Details are used as supporting
-    # context, not as a free-text substring match for names or IDs.
-    for event in events:
+    for event in data.get("activity", []):
         try:
             when = parse_time(event["event_time"])
         except (KeyError, InputError):
             continue
         if when > cutoff:
             continue
-        details = normalize(event.get("details", ""))
-        resource_id = str(event.get("resource_id", "")).strip()
-        if not resource_id:
+        # Join activity to the subject through its associated user_id/email fields
+        # when present; never assume unrelated events are about this request.
+        event_email = normalize(event.get("email") or event.get("subject_email") or "")
+        event_user = normalize(event.get("user_id") or event.get("subject_reference") or "")
+        if event_email not in aliases and event_user not in {_norm_id(u) for u in users}:
             continue
-        email_matches = any(alias and re.search(r"(?<![\\w.+-])" + re.escape(alias) + r"(?![\\w.+-])", details) for alias in aliases)
-        user_matches = any(re.search(r"(?<![\\w])" + re.escape(u) + r"(?![\\w])", details) for u in users if u)
-        if not (email_matches or user_matches):
+        rid = str(event.get("resource_id", "")).strip()
+        if not rid:
             continue
         event_type = str(event.get("event_type", "")).upper()
         result = str(event.get("reported_result", "")).upper()
         source = str(event.get("source_system", ""))
         target = str(event.get("target_system", ""))
-        sysid = target or source or infer_system("", resource_id)
         if event_type in {"CHECK_DATA_FLOW", "SYNC_RECORD", "IMPORT_RECORD", "SYNC_DATA"} and result not in {"FAILED", "CANCELLED", "DISABLED"}:
-            op, state = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE"
-            sysid = target or "integration_service"
+            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", target or "integration_service"
         elif event_type in {"CHECK_RESTORE_ACCESS", "RESTORE_BACKUP", "RESTORE_RECORD"} and result not in {"FAILED", "BLOCKED", "DENIED"}:
-            op, state = "REPORT_RESTORE_RISK", "ACTIVE"
-            sysid = target or "backup_service"
-        elif event_type in {"DELETE_RECORD", "INDEX_RECORD", "CREATE_EXPORT", "SEND_EMAIL", "UPDATE_RECORD", "REFRESH_CACHE", "REDACT_RECORD", "ANONYMIZE_RECORD"}:
-            # Success is only proof when it describes an appropriate verification, not
-            # when it merely reports that a command was submitted. Keep unsuccessful or
-            # partial operations as actionable residual findings.
-            if result not in {"FAILED", "PARTIAL", "PENDING", "UNKNOWN"}:
-                continue
-            category = _resource_category(resource_id, target, source, resource_id)
+            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", target or "backup_service"
+        elif event_type in {"DELETE_RECORD", "INDEX_RECORD", "CREATE_EXPORT", "SEND_EMAIL", "UPDATE_RECORD", "REFRESH_CACHE", "REDACT_RECORD", "ANONYMIZE_RECORD"} and result in {"FAILED", "PARTIAL", "PENDING", "UNKNOWN"}:
+            category = _resource_category(rid, target, source, rid)
             if category == "retained":
                 continue
-            if event_type == "ANONYMIZE_RECORD":
-                op, state = "REPORT_EXPOSED_PII", "PRESENT"
-                sysid = target or "analytics_platform"
-            elif event_type == "REDACT_RECORD":
+            if event_type in {"REDACT_RECORD", "ANONYMIZE_RECORD"}:
                 op, state = "REPORT_EXPOSED_PII", "PRESENT"
             else:
                 op, state = "REPORT_REMAINING_RECORD", "PRESENT"
+            sysid = target or source or infer_system("", rid)
         else:
             continue
-        key = (sysid, resource_id, op)
-        out[key] = Resource(sysid, resource_id, op, state, event["activity_id"])
+        out[(sysid, rid, op)] = Resource(sysid, rid, op, state, event["activity_id"])
     return list(out.values())
 
 def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path)->tuple[str,list[dict[str,Any]]]:

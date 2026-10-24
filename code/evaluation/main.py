@@ -10,7 +10,10 @@ from main import generate, validate_output, InputError  # noqa: E402
 
 def read_rows(path: Path):
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != ["case_id", "deletion_status", "steps_json"]:
+            raise InputError(f"Invalid CSV header in {path}: {reader.fieldnames!r}")
+        return list(reader)
 
 def parse_steps(row):
     return json.loads(row["steps_json"])

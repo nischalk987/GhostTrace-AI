@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from identity_resolution import IdentityResolver
+from temporal_state import observation_is_eligible
 
 OUTPUT_FIELDS = ["case_id", "deletion_status", "steps_json"]
 STEP_FIELDS = ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]
@@ -283,7 +284,7 @@ def _resource_category(path: str, store: str, collection: str, rid: str) -> str:
         return "marketing"
     return "profile"
 
-def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str])->list[Resource]:
+def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None)->list[Resource]:
     found: dict[tuple[str, str, str], Resource] = {}
     user_norm = {_norm_id(u) for u in users}
     for hit in hits:
@@ -298,6 +299,10 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 root = None
             if root is not None:
                 for rec, store, collection in _walk_records(root):
+                    if cutoff is not None:
+                        eligible, _temporal_reason = observation_is_eligible(rec, captured_at=hit.captured_at, audit_at=cutoff)
+                        if not eligible:
+                            continue
                     if not (_contains_subject(rec, aliases, tokens, users) or _record_matches(rec, aliases, users)):
                         continue
                     rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
@@ -362,6 +367,10 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 if len(columns) != len(values):
                     continue
                 rec = dict(zip((c.casefold() for c in columns), (v.strip().strip("'\\\"") for v in values)))
+                if cutoff is not None:
+                    eligible, _temporal_reason = observation_is_eligible(rec, captured_at=hit.captured_at, audit_at=cutoff)
+                    if not eligible:
+                        continue
                 # Newer replicas serialize the original customer record inside a SQL
                 # text column. Unpack that payload before exact identity matching.
                 for payload_key in ("record_json", "payload", "document"):
@@ -397,7 +406,15 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
             continue
         # Text evidence: parse each row/line and attach only the evidence identifier
         # that was captured by the manifest before the case's audit cutoff.
-        for line in hit.text.splitlines():
+        for line_no, line in enumerate(hit.text.splitlines(), start=1):
+            if cutoff is not None:
+                # Text logs commonly encode timestamp=... or event_time=...; malformed
+                # explicit timestamps are not silently treated as current state.
+                temporal_fields = dict(re.findall(r"(?i)(event_time|event_timestamp|occurred_at|effective_at|status_at|observed_at|timestamp)\\s*[=:]\\s*([^,;| ]+)", line))
+                if temporal_fields:
+                    eligible, _temporal_reason = observation_is_eligible(temporal_fields, captured_at=hit.captured_at, audit_at=cutoff)
+                    if not eligible:
+                        continue
             low = line.casefold()
             if not any(alias and alias in low for alias in aliases):
                 continue
@@ -466,7 +483,7 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
 
     tokens = subject_tokens(users, aliases, data["identities"], data["audit"], cutoff)
     hits = [h for h in evidence_cache if h.captured_at <= cutoff]
-    resources = classify_resources(hits, users, aliases, tokens)
+    resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
     plan = build_plan(resources)
 

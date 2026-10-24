@@ -572,14 +572,22 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 if not rid:
                     continue
                 category = _resource_category(path, table, table, rid)
-                if category == "retained":
+                policy_decision = evaluate_record_policy(rec, path, table, rid, policy) if policy is not None else None
+                if policy_decision is not None and policy_decision.action == "RETAIN":
                     continue
-                if category == "tombstone":
-                    direct = any(_norm_id(rec.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name"))
-                    if not direct:
+                if category == "retained":
+                    if policy_decision is not None and policy_decision.action == "UNRESOLVED":
+                        op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", infer_system(path, rid)
+                    else:
+                        continue
+                elif category == "tombstone":
+                    direct = any(_norm_id(rec.get(k)) for k in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash"))
+                    if not direct and (policy_decision is None or policy_decision.action != "UNRESOLVED"):
                         continue
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
                 elif category == "analytics":
+                    if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                        continue
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "analytics_platform"
                 elif category == "flow":
                     sysid = infer_system(path, rid)
@@ -718,7 +726,7 @@ def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[s
     # Resource-specific evidence files provide the evidence-linked findings.
     return []
 
-def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache:list[EvidenceHit])->tuple[str,list[dict[str,Any]]]:
+def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache:list[EvidenceHit],policy_path:Path|None=None)->tuple[str,list[dict[str,Any]]]:
     cutoff = parse_time(case["audit_at"])
     if not request_authorizes_deletion(case["request_text"]):
         return "NOT_APPLICABLE", []
@@ -730,7 +738,7 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
 
     tokens = subject_tokens(users, aliases, data["identities"], data["audit"], cutoff)
     hits = [h for h in evidence_cache if h.captured_at <= cutoff]
-    resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff)
+    resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff, policy_path=policy_path)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
     plan = build_plan(resources)
 
@@ -781,10 +789,11 @@ def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,An
         for doc in evidence_index.documents.values() if doc.status=="INDEXED"
     ]
     evidence_cache.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
+    policy_path = dataset / "deletion_rules.csv"
     for case in data["requests"]:
         cutoff=parse_time(case["audit_at"])
         case_evidence=[hit for hit in evidence_cache if hit.captured_at<=cutoff]
-        status,steps=audit_case(case,data,dataset,case_evidence)
+        status,steps=audit_case(case,data,dataset,case_evidence,policy_path=policy_path)
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
     valid_ids=evidence_index.manifest_ids()
     activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}

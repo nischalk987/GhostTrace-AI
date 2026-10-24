@@ -57,5 +57,28 @@ class EngineRegressionTests(unittest.TestCase):
         with self.assertRaises(InputError):
             validate_output([{"case_id":"case_1","deletion_status":"UNKNOWN","steps_json":"[]"}], {"case_1"})
 
+    def test_output_rejects_out_of_order_phases(self):
+        rows = [{
+            "case_id": "case_1",
+            "deletion_status": "INCOMPLETE",
+            "steps_json": json.dumps([
+                {"step_no": 1, "phase": "REMEDIATION", "system_id": "account_service", "resource_id": "account_1", "operation": "DELETE_RECORD", "state": "ABSENT", "evidence_id": ""},
+                {"step_no": 2, "phase": "FINDING", "system_id": "account_service", "resource_id": "account_1", "operation": "REPORT_REMAINING_RECORD", "state": "PRESENT", "evidence_id": "evidence_1"},
+            ]),
+        }]
+        with self.assertRaises(InputError):
+            validate_output(rows, {"case_1"})
+
+    def test_output_rejects_evidence_on_proposed_action(self):
+        rows = [{
+            "case_id": "case_1",
+            "deletion_status": "INCOMPLETE",
+            "steps_json": json.dumps([
+                {"step_no": 1, "phase": "REMEDIATION", "system_id": "account_service", "resource_id": "account_1", "operation": "DELETE_RECORD", "state": "ABSENT", "evidence_id": "evidence_1"},
+            ]),
+        }]
+        with self.assertRaises(InputError):
+            validate_output(rows, {"case_1"})
+
 if __name__ == "__main__":
     unittest.main()

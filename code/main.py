@@ -412,7 +412,8 @@ def evaluate_record_policy(record: Mapping[str, Any], path: str, store: str,
     return decision
 
 
-def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None)->list[Resource]:
+def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None,policy_path:Path|None=None)->list[Resource]:
+    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
     found: dict[tuple[str, str, str], Resource] = {}
     found_order: dict[tuple[str, str, str], tuple[datetime, str]] = {}
     temporal_events: dict[tuple[str, str], list[TemporalEvent]] = {}
@@ -439,7 +440,6 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     if not rid:
                         continue
                     category = _resource_category(path, store, collection, rid)
-                    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
                     policy_decision = evaluate_record_policy(rec, path, store, rid, policy) if policy is not None else None
                     fields = {str(k).casefold(): v for k, v in rec.items()}
                     direct = any(_norm_id(fields.get(k)) for k in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash"))

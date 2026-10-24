@@ -97,7 +97,7 @@ class EvidenceIndexTests(unittest.TestCase):
                 encoding="utf-8")
             manifest_path = root / "evidence_files.csv"
             with manifest_path.open("a", encoding="utf-8") as handle:
-                handle.write("ev8,evidence/databases/unsafe.sql,sql,2026-01-06T00:00:00Z\\n")
+                handle.write("ev8,evidence/databases/unsafe.sql,sql,2026-01-06T00:00:00Z\n")
             index = EvidenceIndex(root).build()
             self.assertIn("SQL_PARSE_ERROR", {d.code for d in index.diagnostics})
             self.assertEqual(external.read_text(encoding="utf-8"), "must remain unchanged")

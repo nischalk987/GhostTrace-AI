@@ -30,3 +30,14 @@ Standalone tests:
 ```bash
 python -m unittest discover -s code -p "test_evidence_index.py" -v
 ```
+
+
+## Historical state reconstruction
+
+`code/temporal_state.py` provides UTC timestamp normalization and deterministic state reconstruction as of a request's `audit_at`. Event time (for ordering a state transition), evidence capture time (when an artifact was collected), request time, reported workflow time, and audit cutoff remain distinct. Events or evidence captured after the cutoff are excluded; explicit malformed event timestamps are rejected rather than replaced with the current time. At the latest event instant, conflicting state claims return `UNKNOWN` with `CONFLICTING` certainty and a provenance/explanation chain instead of silently choosing whichever row was read last. The production resource classifier also gates structured rows and text/log lines by explicit event timestamps.
+
+Temporal-specific tests:
+
+```bash
+python -m unittest discover -s code -p "test_temporal_state.py" -v
+```

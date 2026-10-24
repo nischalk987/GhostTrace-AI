@@ -184,8 +184,8 @@ def _walk_records(value: Any, inherited_store: str = "", inherited_collection: s
     if isinstance(value, dict):
         store = str(value.get("data_store") or inherited_store)
         collection = str(value.get("collection") or inherited_collection)
-        # Evidence snapshots often wrap the actual row in record_json or
-        # record_json strings, especially when the source was a SQL replica.
+        # Evidence snapshots commonly nest customer records in multiple service
+        # exports and search "documents" arrays. Preserve the service store/collection.
         for key, child in value.items():
             if isinstance(child, str) and key.casefold() in {"record_json", "payload", "document"}:
                 try:
@@ -251,7 +251,10 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                         continue
                     category = _resource_category(path, store, collection, rid)
                     fields = {str(k).casefold(): v for k, v in rec.items()}
-                    direct = any(_norm_id(fields.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name"))
+                    direct = any(_norm_id(fields.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name", "full_name"))
+                    # Search exports often wrap the hit in a query object and repeat
+                    # the resource ID on the parent. A nested document's exact subject
+                    # match must classify the parent resource, not only the child.
                     if category == "retained":
                         # Policy-retained audit/security records are not residual deletion failures.
                         continue
@@ -263,13 +266,13 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     elif category == "flow":
                         enabled = str(fields.get("enabled", fields.get("status", ""))).casefold()
                         if enabled in {"true", "1", "enabled", "active", "running"}:
-                            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", str(rec.get("system_id") or "integration_service")
+                            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", str(rec.get("system_id") or store or "integration_service")
                         else:
                             continue
                     elif category == "backup":
                         restorable = str(fields.get("restorable", fields.get("restore_allowed", fields.get("status", "")))).casefold()
                         if restorable in {"true", "1", "yes", "restorable", "enabled", "active"}:
-                            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", str(rec.get("system_id") or "backup_service")
+                            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", str(rec.get("system_id") or store or "backup_service")
                         else:
                             continue
                     elif category == "analytics":

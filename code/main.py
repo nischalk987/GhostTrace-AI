@@ -76,6 +76,8 @@ def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]
         ids.add(r["case_id"]); parse_time(r["requested_at"]); parse_time(r["audit_at"])
     return {"requests":requests,"identities":identities,"audit":audit,"activity":activity,"rules":rules,"manifest":manifest}
 
+from evidence_index import EvidenceIndex
+
 @dataclass(frozen=True)
 class EvidenceHit:
     file_id:str

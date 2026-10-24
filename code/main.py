@@ -316,9 +316,10 @@ def _temporal_resource_state(record: dict[str, Any], category: str) -> str:
 
 def _resource_observation_time(record: dict[str, Any], captured_at: datetime) -> datetime:
     """Use explicit event/effective time; otherwise use known snapshot capture time."""
+    fields = {str(k).casefold(): v for k, v in record.items()}
     for key in ("event_time", "event_timestamp", "occurred_at", "effective_at",
                 "status_at", "observed_at", "timestamp"):
-        raw = record.get(key)
+        raw = fields.get(key)
         if raw is not None and str(raw).strip():
             return normalize_timestamp(str(raw))
     return normalize_timestamp(captured_at)

@@ -352,61 +352,30 @@ def build_plan(resources:list[Resource])->list[dict[str,Any]]:
     return steps
 
 def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[str], aliases: set[str], cutoff: datetime) -> list[Resource]:
-    out: dict[tuple[str, str, str], Resource] = {}
-    for event in data.get("activity", []):
-        try:
-            when = parse_time(event["event_time"])
-        except (KeyError, InputError):
-            continue
-        if when > cutoff:
-            continue
-        # Join activity to the subject through its associated user_id/email fields
-        # when present; never assume unrelated events are about this request.
-        event_email = normalize(event.get("email") or event.get("subject_email") or "")
-        event_user = normalize(event.get("user_id") or event.get("subject_reference") or "")
-        if event_email not in aliases and event_user not in {_norm_id(u) for u in users}:
-            continue
-        rid = str(event.get("resource_id", "")).strip()
-        if not rid:
-            continue
-        event_type = str(event.get("event_type", "")).upper()
-        result = str(event.get("reported_result", "")).upper()
-        source = str(event.get("source_system", ""))
-        target = str(event.get("target_system", ""))
-        if event_type in {"CHECK_DATA_FLOW", "SYNC_RECORD", "IMPORT_RECORD", "SYNC_DATA"} and result not in {"FAILED", "CANCELLED", "DISABLED"}:
-            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", target or "integration_service"
-        elif event_type in {"CHECK_RESTORE_ACCESS", "RESTORE_BACKUP", "RESTORE_RECORD"} and result not in {"FAILED", "BLOCKED", "DENIED"}:
-            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", target or "backup_service"
-        elif event_type in {"DELETE_RECORD", "INDEX_RECORD", "CREATE_EXPORT", "SEND_EMAIL", "UPDATE_RECORD", "REFRESH_CACHE", "REDACT_RECORD", "ANONYMIZE_RECORD"} and result in {"FAILED", "PARTIAL", "PENDING", "UNKNOWN"}:
-            category = _resource_category(rid, target, source, rid)
-            if category == "retained":
-                continue
-            if event_type in {"REDACT_RECORD", "ANONYMIZE_RECORD"}:
-                op, state = "REPORT_EXPOSED_PII", "PRESENT"
-            else:
-                op, state = "REPORT_REMAINING_RECORD", "PRESENT"
-            sysid = target or source or infer_system("", rid)
-        else:
-            continue
-        out[(sysid, rid, op)] = Resource(sysid, rid, op, state, event["activity_id"])
-    return list(out.values())
+    # The activity export is global and its rows do not contain subject IDs in
+    # dedicated columns. Therefore it cannot safely be attributed to a subject here.
+    # Resource-specific evidence files provide the evidence-linked findings.
+    return []
 
 def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path)->tuple[str,list[dict[str,Any]]]:
-    cutoff=parse_time(case["audit_at"])
+    cutoff = parse_time(case["audit_at"])
     if not request_authorizes_deletion(case["request_text"]):
         return "NOT_APPLICABLE", []
+
     users, aliases = identity_aliases(case["email"], data["identities"], data["audit"], cutoff)
     if not users:
+        # Do not invent identifiers or treat an unresolvable identity as proof of absence.
         return "INCOMPLETE", []
+
     tokens = subject_tokens(users, aliases, data["identities"], data["audit"], cutoff)
     hits = read_evidence(dataset, data["manifest"], cutoff)
     resources = classify_resources(hits, users, aliases, tokens)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
     plan = build_plan(resources)
-    if not plan:
-        # A clean state must be affirmatively evidenced by cutoff-aware readback.
-        # Never infer COMPLETE from workflow status or from absence of positive hits.
-        return "INCOMPLETE", []
+
+    # A clean result requires explicit negative-state evidence for the account and
+    # any policy-relevant retained resources. The positive-evidence scanner does not
+    # have enough information to assert COMPLETE by itself.
     return "INCOMPLETE", plan
 
 def validate_output(rows:list[dict[str,str]],expected:set[str])->None:

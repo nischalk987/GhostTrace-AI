@@ -327,7 +327,7 @@ class EvidenceIndex:
             def authorize(action, arg1, arg2, database_name, trigger_name):
                 if action in allowed:
                     return sqlite3.SQLITE_OK
-                if action == sqlite3.SQLITE_UPDATE and str(arg1).casefold() == "sqlite_sequence":
+                if action == sqlite3.SQLITE_UPDATE and str(arg1).casefold() in {"sqlite_master", "sqlite_temp_master", "sqlite_sequence"}:
                     return sqlite3.SQLITE_OK
                 return sqlite3.SQLITE_DENY
             connection.set_authorizer(authorize)

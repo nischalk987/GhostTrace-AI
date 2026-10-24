@@ -65,6 +65,16 @@ def request_authorizes_deletion(text: str)->bool:
         return False
     return positive
 
+def validate_policy_inputs(dataset: Path, rules: list[dict[str, str]]) -> None:
+    """Fail fast on malformed or duplicate policy definitions from the supplied dataset."""
+    from deletion_policy import PolicyError
+    policy_path = dataset / "deletion_rules.csv"
+    policy = DeletionPolicy.from_csv(policy_path)
+    # Ensure the pre-loaded table and separately validated decision engine agree.
+    if len(policy.rules) != len(rules):
+        raise InputError(f"{policy_path}: rule count changed during validation")
+
+
 def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]:
     requests=read_csv(requests_file or (dataset/"deletion_requests.csv"),["case_id","email","requested_at","reported_status","reported_at","audit_at","request_text"])
     identities=read_csv(dataset/"user_identities.csv",["user_id","name","email","phone","email_hash","updated_at"])
@@ -73,7 +83,7 @@ def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]
     rules=read_csv(dataset/"deletion_rules.csv",["rule_id","data_category","condition","required_action"])
     manifest=read_csv(dataset/"evidence_files.csv",["file_id","file_path","origin","captured_at"])
     # Policy structure is validated as part of input loading before any audit begins.
-    DeletionPolicy.from_csv(dataset/"deletion_rules.csv")
+    validate_policy_inputs(dataset, rules)
     ids=set()
     for r in requests:
         if not r["case_id"].strip() or r["case_id"] in ids: raise InputError(f"Empty or duplicate case_id: {r['case_id']!r}")

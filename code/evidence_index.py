@@ -139,15 +139,22 @@ class EvidenceIndex:
                 digest = hashlib.sha256(raw).hexdigest()
                 if suffix in SUPPORTED_TEXT:
                     text_value = raw.decode("utf-8-sig", errors="strict")
+                    diagnostic_count = len(self.diagnostics)
                     facts = self._extract_text_facts(file_id, relative, captured_at, digest, suffix, text_value)
-                    doc = EvidenceDocument(file_id, relative, origin, captured_at, "INDEXED", digest, text_value, tuple(facts))
-                    self.facts.extend(facts)
-                    self._by_file[file_id] = list(facts)
-                    for fact in facts:
-                        if fact.resource_id:
-                            self._by_resource.setdefault(fact.resource_id.casefold(), []).append(fact)
-                        for key, value in fact.subject_identifiers:
-                            self._by_subject.setdefault((key, normalize_value(value)), []).append(fact)
+                    parse_failed = any(
+                        d.file_id == file_id and d.code in {"CORRUPT_JSON", "CORRUPT_CSV", "SQL_PARSE_ERROR"}
+                        for d in self.diagnostics[diagnostic_count:]
+                    )
+                    status = "ERROR" if parse_failed else "INDEXED"
+                    doc = EvidenceDocument(file_id, relative, origin, captured_at, status, digest, text_value, tuple(facts))
+                    if not parse_failed:
+                        self.facts.extend(facts)
+                        self._by_file[file_id] = list(facts)
+                        for fact in facts:
+                            if fact.resource_id:
+                                self._by_resource.setdefault(fact.resource_id.casefold(), []).append(fact)
+                            for key, value in fact.subject_identifiers:
+                                self._by_subject.setdefault((key, normalize_value(value)), []).append(fact)
                 else:
                     self._diag(file_id, relative, "BINARY_TEXT_UNAVAILABLE",
                                "PDF/image content requires an OCR adapter; manifest and filename were not treated as evidence")

@@ -258,7 +258,7 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
             # avoid treating schema/comments as state, inspect parsed INSERT tuples.
             # Tokens must occur as exact SQL string literals in a row containing a
             # recognized resource id. The row is associated with the table's store.
-            insert_re = re.compile(r"INSERT\\s+INTO\\s+[`\\\"']?([A-Za-z_][\\w]*)[`\\\"']?\\s*\\(([^)]*)\\)\\s*VALUES\\s*\\((.*?)\\)\\s*;", re.I | re.S)
+            insert_re = re.compile(r"INSERT\s+INTO\s+[`\"]?([A-Za-z_][\w]*)[`\"]?\s*\(([^)]*)\)\s*VALUES\s*\((.*?)\)\s*;", re.I | re.S)
             for match in insert_re.finditer(hit.text):
                 table, columns_text, values_text = match.groups()
                 columns = [c.strip().strip('`"[] ') for c in columns_text.split(",")]

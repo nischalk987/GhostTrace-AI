@@ -49,6 +49,20 @@ def compare(dataset: Path) -> dict:
                 ("phase", "system_id", "resource_id", "operation", "state", "evidence_id")))
     expected_counts, predicted_counts = Counter(expected_step_tuples), Counter(predicted_step_tuples)
     matched_steps = sum((expected_counts & predicted_counts).values())
+    case_diffs = []
+    for key in shared:
+        exp, pred = expected_by_id[key], predicted_by_id[key]
+        exp_steps, pred_steps = parse_steps(exp), parse_steps(pred)
+        if exp["deletion_status"] != pred["deletion_status"] or exp_steps != pred_steps:
+            case_diffs.append({
+                "case_id": key,
+                "expected_status": exp["deletion_status"],
+                "predicted_status": pred["deletion_status"],
+                "expected_step_count": len(exp_steps),
+                "predicted_step_count": len(pred_steps),
+                "expected_ops": [(s["system_id"], s["resource_id"], s["operation"], s["evidence_id"]) for s in exp_steps],
+                "predicted_ops": [(s["system_id"], s["resource_id"], s["operation"], s["evidence_id"]) for s in pred_steps],
+            })
     return {
         "sample_cases": len(shared),
         "status_correct": status_correct,
@@ -61,6 +75,7 @@ def compare(dataset: Path) -> dict:
         "matched_step_tuples": matched_steps,
         "step_tuple_precision": matched_steps / len(predicted_step_tuples) if predicted_step_tuples else 1.0,
         "step_tuple_recall": matched_steps / len(expected_step_tuples) if expected_step_tuples else 1.0,
+        "case_diffs": case_diffs,
         "note": "Measured against the public sample_output.csv, not hidden-set accuracy."
     }
 

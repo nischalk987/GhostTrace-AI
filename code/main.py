@@ -166,9 +166,19 @@ def _walk_records(value: Any, inherited_store: str = "", inherited_collection: s
     if isinstance(value, dict):
         store = str(value.get("data_store") or inherited_store)
         collection = str(value.get("collection") or inherited_collection)
+        # Evidence snapshots often wrap the actual row in record_json or
+        # record_json strings, especially when the source was a SQL replica.
+        for key, child in value.items():
+            if isinstance(child, str) and key.casefold() in {"record_json", "payload", "document"}:
+                try:
+                    parsed = json.loads(child)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, (dict, list)):
+                    yield from _walk_records(parsed, store, collection)
         if any(k in value for k in ("resource_id", "record_id", "id")):
             yield value, store, collection
-        for child in value.values():
+        for key, child in value.items():
             if isinstance(child, (dict, list)):
                 yield from _walk_records(child, store, collection)
     elif isinstance(value, list):

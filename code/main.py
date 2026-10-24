@@ -266,10 +266,10 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 if not columns:
                     # SQLite allows INSERT INTO table VALUES(...) without a column list;
                     # use the table definition preceding this row to recover column names.
-                    table_match = re.search(r"CREATE\\s+TABLE\\s+[`\"]?" + re.escape(table) + r"[`\"]?\\s*\\((.*?)\\)\\s*;", hit.text, re.I | re.S)
+                    table_match = re.search(r"CREATE\s+TABLE\s+[`\"]?" + re.escape(table) + r"[`\"]?\s*\((.*?)\)\s*;", hit.text, re.I | re.S)
                     if not table_match:
                         continue
-                    columns = re.findall(r"^\\s*([A-Za-z_][\\w]*)\\s+(?:TEXT|INTEGER|REAL|BLOB|NUMERIC)", table_match.group(1), re.I | re.M)
+                    columns = re.findall(r"^\s*([A-Za-z_][\w]*)\s+(?:TEXT|INTEGER|REAL|BLOB|NUMERIC)", table_match.group(1), re.I | re.M)
                 try:
                     values = next(csv.reader([values_text], skipinitialspace=True, quotechar="'"))
                 except Exception:

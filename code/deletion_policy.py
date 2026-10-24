@@ -159,8 +159,20 @@ class DeletionPolicy:
         candidates = [rule for rule in self.rules if rule.data_category == category]
         matched: list[PolicyRule] = []
         unknown: list[PolicyRule] = []
+        normalized_context = {str(k).casefold(): v for k, v in context.items()}
         for rule in candidates:
-            result = _condition_result(rule, context)
+            # The tombstone rule depends on two independent facts. If either fact is
+            # absent from evidence, preserve uncertainty explicitly rather than
+            # evaluating a partial condition as false/not-applicable.
+            if rule.data_category == "ACCOUNT_TOMBSTONE":
+                deleted_keys = ("account_deleted", "deleted_account", "deletion_confirmed")
+                stable_keys = ("stable_user_id_required", "stable_reference_required", "retained_record_references")
+                if not any(k in normalized_context for k in deleted_keys) or not any(k in normalized_context for k in stable_keys):
+                    result = None
+                else:
+                    result = _condition_result(rule, normalized_context)
+            else:
+                result = _condition_result(rule, normalized_context)
             if result is True:
                 matched.append(rule)
             elif result is None:

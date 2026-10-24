@@ -8,7 +8,7 @@ Python 3.10+; standard library only. From repository root:
 python code/main.py --validate-only
 python code/main.py --dataset dataset --output output.csv
 python -m unittest discover -s code -p "test_*.py" -v
-python code/evaluate.py --dataset dataset --sample-only
+python code/evaluate.py --dataset dataset
 ```
 
 The engine validates input schemas, resolves current and historical email aliases as of `audit_at`, ignores evidence manifest items captured after each case cutoff, parses nested JSON records and SQLite-compatible SQL INSERT rows, and writes the required output schema. Findings cite evidence IDs; proposed future actions have empty evidence IDs.

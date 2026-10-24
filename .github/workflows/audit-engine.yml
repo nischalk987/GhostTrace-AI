@@ -1,0 +1,52 @@
+name: Audit engine checks
+
+on:
+  push:
+    branches:
+      - fix/issue-1-audit-engine
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "code/**"
+      - ".github/workflows/audit-engine.yml"
+      - "dataset/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contract-and-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile source
+        run: python -m compileall -q code
+      - name: Run contract tests
+        run: python -m unittest discover -s code -p "test_*.py" -v
+      - name: Validate all input schemas
+        run: python code/main.py --validate-only
+      - name: Compare public sample answers
+        run: python code/evaluation/main.py --dataset dataset
+      - name: Generate full output and validate row count
+        run: |
+          python code/main.py --dataset dataset --output /tmp/output.csv
+          python - <<'PY'
+          import csv, json
+          p = "/tmp/output.csv"
+          with open(p, encoding="utf-8", newline="") as f:
+              rows = list(csv.DictReader(f))
+          assert len(rows) == 518, f"expected 518 rows, got {len(rows)}"
+          assert [r["case_id"] for r in rows] == sorted(r["case_id"] for r in rows)
+          assert all(set(r) == {"case_id", "deletion_status", "steps_json"} for r in rows)
+          for row in rows:
+              assert row["deletion_status"] in {"COMPLETE", "INCOMPLETE", "NOT_APPLICABLE"}
+              steps = json.loads(row["steps_json"])
+              assert isinstance(steps, list)
+          print("validated 518 output rows")
+          PY

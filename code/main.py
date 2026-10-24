@@ -121,6 +121,24 @@ def subject_tokens(users:set[str],aliases:set[str],identities:list[dict[str,str]
             tokens.update(normalize(r[k]) for k in ("old_value","new_value") if normalize(r[k]))
     return {t for t in tokens if t}
 
+def _extract_nested_objects(value: Any):
+    """Yield each nested mapping; wrappers and embedded JSON need equal treatment."""
+    yield from _walk_records(value)
+
+def _record_matches(record: dict[str, Any], aliases: set[str], users: set[str]) -> bool:
+    user_keys = {"user_id", "subject_reference", "customer_reference", "customer_id", "account_user_id", "owner_user_id"}
+    email_keys = {"email", "display_email", "old_email", "new_email", "customer_email"}
+    for key, value in record.items():
+        k = str(key).casefold()
+        v = _norm_id(value)
+        if not v:
+            continue
+        if k in email_keys and v in aliases:
+            return True
+        if k in user_keys and v in {_norm_id(u) for u in users}:
+            return True
+    return False
+
 def json_objects(text:str)->list[dict[str,Any]]:
     try: root=json.loads(text)
     except json.JSONDecodeError: return []
@@ -226,7 +244,7 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 root = None
             if root is not None:
                 for rec, store, collection in _walk_records(root):
-                    if not _contains_subject(rec, aliases, tokens, users):
+                    if not (_contains_subject(rec, aliases, tokens, users) or _record_matches(rec, aliases, users)):
                         continue
                     rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
                     if not rid:

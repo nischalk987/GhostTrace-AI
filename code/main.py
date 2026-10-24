@@ -93,17 +93,29 @@ class Resource:
     evidence_id:str
 
 def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None=None)->list[EvidenceHit]:
-    """Compatibility adapter over the reusable, manifest-backed evidence index."""
-    index = EvidenceIndex(dataset).build()
-    # Keep the existing function API for the current classifier, while all manifest
-    # scanning, safe path checks and diagnostics live in the shared index.
+    """Compatibility API using manifest rows; production generate() uses one shared index."""
     hits=[]
-    for document in index.documents.values():
-        if document.status != "INDEXED":
+    root=dataset.resolve()
+    for entry in manifest:
+        captured=parse_time(entry["captured_at"])
+        if cutoff is not None and captured>cutoff:
             continue
-        if cutoff is not None and document.captured_at > cutoff:
+        raw=entry["file_path"].replace("\\","/")
+        parts=[p for p in raw.split("/") if p not in {"",".","dataset"}]
+        if not parts or parts[0]!="evidence" or any(p==".." for p in raw.split("/")):
             continue
-        hits.append(EvidenceHit(document.file_id, document.file_path, document.captured_at, document.text))
+        path=(root/Path(*parts)).resolve()
+        try:
+            path.relative_to((root/"evidence").resolve())
+        except ValueError:
+            continue
+        if not path.is_file() or path.suffix.casefold() not in {".txt",".log",".json",".sql",".csv",".md"}:
+            continue
+        try:
+            text=path.read_text(encoding="utf-8-sig")
+        except (OSError,UnicodeError):
+            continue
+        hits.append(EvidenceHit(entry["file_id"],path.relative_to(root).as_posix(),captured,text))
     hits.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
     return hits
 

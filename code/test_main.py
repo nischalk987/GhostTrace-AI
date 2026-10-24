@@ -4,7 +4,7 @@ from pathlib import Path
 
 from main import (
     InputError, Resource, _walk_records, build_plan, identity_aliases,
-    parse_time, request_authorizes_deletion, read_evidence, validate_output, classify_resources, EvidenceHit, evaluate_record_policy,
+    parse_time, request_authorizes_deletion, read_evidence, validate_output, classify_resources, EvidenceHit, evaluate_record_policy, validate_step_sequence,
 )
 
 class EngineRegressionTests(unittest.TestCase):

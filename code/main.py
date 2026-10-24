@@ -716,9 +716,18 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
     return list(found.values())
 
 def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)->dict[str,Any]:
-    """Construct one schema-valid step; the sequence validator checks case-level rules."""
+    """Construct one schema-valid step; sequence invariants are checked once the plan is complete."""
     s={"step_no":n,"phase":phase,"system_id":system,"resource_id":rid,"operation":op,"state":state,"evidence_id":evidence}
-    validate_step_sequence([s], "step")
+    if list(s)!=STEP_FIELDS or (phase,op,state) not in ALLOWED:
+        raise InputError(f"Invalid step: {s}")
+    if not all(isinstance(s[k], str) for k in ("phase","system_id","resource_id","operation","state","evidence_id")):
+        raise InputError(f"Step fields must be strings: {s}")
+    if not system.strip() or not rid.strip():
+        raise InputError(f"Step system_id/resource_id cannot be empty: {s}")
+    if phase=="FINDING" and not evidence.strip():
+        raise InputError("Finding must cite evidence")
+    if phase!="FINDING" and evidence:
+        raise InputError("Proposed future action must not cite existing evidence")
     return s
 
 def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[str,Any]]:
@@ -764,6 +773,7 @@ def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[s
         ver.append((OP_ORDER[vop],r.system_id,r.resource_id,vop,vstate))
     for _,sysid,rid,op,state in sorted(rem): steps.append(make_step(len(steps)+1,"REMEDIATION",sysid,rid,op,state,""))
     for _,sysid,rid,op,state in sorted(ver): steps.append(make_step(len(steps)+1,"VERIFICATION",sysid,rid,op,state,""))
+    validate_step_sequence(steps, "generated plan")
     return steps
 
 def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[str], aliases: set[str], cutoff: datetime) -> list[Resource]:

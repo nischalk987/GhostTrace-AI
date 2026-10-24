@@ -40,14 +40,35 @@ class EngineRegressionTests(unittest.TestCase):
     def test_evidence_after_cutoff_is_excluded(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            (root / "before.txt").write_text("before", encoding="utf-8")
-            (root / "after.txt").write_text("after", encoding="utf-8")
+            (root / "evidence").mkdir()
+            (root / "evidence" / "before.txt").write_text("before", encoding="utf-8")
+            (root / "evidence" / "after.txt").write_text("after", encoding="utf-8")
             manifest = [
-                {"file_id":"e1","file_path":"before.txt","captured_at":"2026-01-01T00:00:00Z"},
-                {"file_id":"e2","file_path":"after.txt","captured_at":"2026-02-01T00:00:00Z"},
+                {"file_id":"e1","file_path":"evidence/before.txt","captured_at":"2026-01-01T00:00:00Z"},
+                {"file_id":"e2","file_path":"evidence/after.txt","captured_at":"2026-02-01T00:00:00Z"},
             ]
             hits = read_evidence(root, manifest, parse_time("2026-01-15T00:00:00Z"))
             self.assertEqual([h.file_id for h in hits], ["e1"])
+
+    def test_manifest_scanner_validates_paths_and_reports_broken_files(self):
+        from evidence_index import EvidenceIndex
+        with tempfile.TemporaryDirectory() as td:
+            dataset = Path(td) / "dataset"
+            (dataset / "evidence" / "records").mkdir(parents=True)
+            (dataset / "evidence" / "records" / "sample.json").write_text(
+                '{"resource_id":"search_1","email":"a@example.com"}', encoding="utf-8")
+            (dataset / "evidence_files.csv").write_text(
+                "file_id,file_path,origin,captured_at\n"
+                "ev1,evidence/records/sample.json,manifest-hint,2026-01-01T00:00:00Z\n"
+                "ev2,../outside.json,manifest-hint,2026-01-01T00:00:00Z\n"
+                "ev3,evidence/records/missing.json,manifest-hint,2026-01-01T00:00:00Z\n",
+                encoding="utf-8")
+            index = EvidenceIndex(dataset).build()
+            self.assertTrue(index.query_subject("email", "a@example.com"))
+            codes = {d.code for d in index.diagnostics}
+            self.assertIn("UNSAFE_PATH", codes)
+            self.assertIn("MISSING_FILE", codes)
+            self.assertEqual(index.documents["ev1"].status, "INDEXED")
 
     def test_nested_record_json_is_parsed(self):
         rows = list(_walk_records({"data_store":"analytics_platform","records":[

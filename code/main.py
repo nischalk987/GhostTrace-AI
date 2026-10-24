@@ -76,6 +76,8 @@ def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]
         ids.add(r["case_id"]); parse_time(r["requested_at"]); parse_time(r["audit_at"])
     return {"requests":requests,"identities":identities,"audit":audit,"activity":activity,"rules":rules,"manifest":manifest}
 
+from evidence_index import EvidenceIndex
+
 @dataclass(frozen=True)
 class EvidenceHit:
     file_id:str
@@ -91,17 +93,33 @@ class Resource:
     evidence_id:str
 
 def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None=None)->list[EvidenceHit]:
+    """Legacy reader for unit callers; production generate() reuses one EvidenceIndex."""
     hits=[]
-    for e in manifest:
-        captured=parse_time(e["captured_at"])
-        if cutoff is not None and captured>cutoff: continue
-        rel=e["file_path"].replace("\\","/").lstrip("/")
-        path=(dataset/rel).resolve()
-        if not path.is_relative_to(dataset.resolve()) or not path.is_file(): continue
-        if path.suffix.lower() not in {".txt",".log",".json",".sql",".csv",".md"}: continue
-        try: content=path.read_text(encoding="utf-8",errors="replace")
-        except OSError: continue
-        hits.append(EvidenceHit(e["file_id"],rel,captured,content))
+    root=dataset.resolve()
+    for entry in manifest:
+        captured=parse_time(entry["captured_at"])
+        if cutoff is not None and captured>cutoff:
+            continue
+        raw=entry["file_path"].replace("\\","/")
+        pieces=raw.split("/")
+        if any(part==".." for part in pieces):
+            continue
+        parts=[part for part in pieces if part not in {"",".","dataset"}]
+        if not parts or parts[0]!="evidence":
+            continue
+        path=(root/Path(*parts)).resolve()
+        try:
+            path.relative_to((root/"evidence").resolve())
+        except ValueError:
+            continue
+        if not path.is_file() or path.suffix.casefold() not in {".txt",".log",".json",".sql",".csv",".md"}:
+            continue
+        try:
+            text=path.read_text(encoding="utf-8-sig")
+        except (OSError,UnicodeError):
+            continue
+        hits.append(EvidenceHit(entry["file_id"],path.relative_to(root).as_posix(),captured,text))
+    hits.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
     return hits
 
 def identity_aliases(email:str,identities:list[dict[str,str]],audit:list[dict[str,str]],cutoff:datetime):
@@ -491,16 +509,31 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
 
 def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
     data=load_inputs(dataset,requests_file); results=[]
-    max_cutoff=max(parse_time(r["audit_at"]) for r in data["requests"])
-    evidence_cache=read_evidence(dataset,data["manifest"],max_cutoff)
+    evidence_index=EvidenceIndex(dataset).build()
+    for diagnostic in evidence_index.diagnostics:
+        print(f"[evidence:{diagnostic.code}] {diagnostic.file_id} {diagnostic.path}: {diagnostic.message}", file=sys.stderr)
+    evidence_cache=[
+        EvidenceHit(doc.file_id,doc.file_path,doc.captured_at,doc.text)
+        for doc in evidence_index.documents.values() if doc.status=="INDEXED"
+    ]
+    evidence_cache.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
     for case in data["requests"]:
-        status,steps=audit_case(case,data,dataset,evidence_cache)
+        cutoff=parse_time(case["audit_at"])
+        case_evidence=[hit for hit in evidence_cache if hit.captured_at<=cutoff]
+        status,steps=audit_case(case,data,dataset,case_evidence)
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
+    valid_ids=evidence_index.manifest_ids()
+    activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}
+    for row in results:
+        for step in json.loads(row["steps_json"]):
+            if step["phase"]=="FINDING" and step["evidence_id"] not in valid_ids|activity_ids:
+                raise InputError(f"Finding cites unknown evidence ID {step['evidence_id']!r} in {row['case_id']}")
     results.sort(key=lambda r:r["case_id"]); validate_output(results,{r["case_id"] for r in data["requests"]})
     output.parent.mkdir(parents=True,exist_ok=True)
     with output.open("w",encoding="utf-8",newline="") as f:
         writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\n"); writer.writeheader(); writer.writerows(results)
-    return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output)}
+    return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output),
+            "evidence_index":evidence_index.stats()}
 
 
 def main()->int:

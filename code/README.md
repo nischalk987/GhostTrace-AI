@@ -20,3 +20,13 @@ The engine validates input schemas, resolves current and historical email aliase
 ## Known limits
 
 The engine is deterministic and has no model/API cost. PDF/image screenshots are not yet OCR-parsed; legal-hold and retention rules need subject-specific extraction from source documents. The engine does not assert `COMPLETE` from absence of positive evidence alone. Treat outputs as a baseline until sample metrics and remaining evidence adapters are reviewed.
+
+## Manifest-backed evidence index
+
+The reusable `code/evidence_index.py` index validates every manifest path beneath `dataset/evidence/`, parses JSON/CSV/SQLite-compatible SQL and text/log records once per run, and records source provenance (evidence ID, source path, source line/row, timestamp, system/resource IDs, subject identifiers, and SHA-256). Missing, corrupt, unsafe, duplicate, unreadable, and unsupported items are surfaced as stderr diagnostics. PDF and image files are inventoried but are not used as evidence until an OCR adapter is configured; filenames and manifest labels are never proof.
+
+Standalone tests:
+
+```bash
+python -m unittest discover -s code -p "test_evidence_index.py" -v
+```

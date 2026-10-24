@@ -1,6 +1,6 @@
 # Identity resolution module
 
-Uses only Python's standard library to resolve a subject from current and historical identifiers, with source-row provenance and conservative ambiguity handling.
+Uses only Python's standard library to resolve a subject from current and historical identifiers, with source-row provenance and conservative ambiguity handling. The deletion engine invokes this resolver before collecting subject aliases; ambiguous or unknown identifiers yield no aliases and cannot merge unrelated users into one audit.
 
 ## API
 ```python

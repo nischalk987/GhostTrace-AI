@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/issue-1-audit-engine
+      - fix/issue-6-sequence-validator
   pull_request:
     branches:
       - main

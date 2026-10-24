@@ -100,10 +100,13 @@ def _condition_result(rule: PolicyRule, context: Mapping[str, Any]) -> bool | No
                 return _truth(ctx[key])
         return None
     if category == "ACCOUNT_TOMBSTONE":
-        # Direct PII is always forbidden here; stable user_id is the only allowed
-        # identifying reference when retained-record linkage requires it.
-        deleted = any(_truth(ctx[k]) for k in ("account_deleted", "deleted_account", "deletion_confirmed") if k in ctx)
-        stable = any(_truth(ctx[k]) for k in ("stable_user_id_required", "stable_reference_required", "retained_record_references") if k in ctx)
+        # Missing either required fact is uncertainty, not proof the rule is irrelevant.
+        deleted_keys = ("account_deleted", "deleted_account", "deletion_confirmed")
+        stable_keys = ("stable_user_id_required", "stable_reference_required", "retained_record_references")
+        if not any(k in ctx for k in deleted_keys) or not any(k in ctx for k in stable_keys):
+            return None
+        deleted = any(_truth(ctx[k]) for k in deleted_keys if k in ctx)
+        stable = any(_truth(ctx[k]) for k in stable_keys if k in ctx)
         return deleted and stable
     # A non-empty but unrecognized condition must never be guessed true.
     return None

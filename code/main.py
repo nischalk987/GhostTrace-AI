@@ -127,7 +127,8 @@ def _extract_nested_objects(value: Any):
 
 def _record_matches(record: dict[str, Any], aliases: set[str], users: set[str]) -> bool:
     user_keys = {"user_id", "subject_reference", "customer_reference", "customer_id", "account_user_id", "owner_user_id"}
-    email_keys = {"email", "display_email", "old_email", "new_email", "customer_email"}
+    email_keys = {"email", "display_email", "old_email", "new_email", "customer_email", "requester_email", "owner_email"}
+    normalized_users = {_norm_id(u) for u in users}
     for key, value in record.items():
         k = str(key).casefold()
         v = _norm_id(value)
@@ -135,7 +136,7 @@ def _record_matches(record: dict[str, Any], aliases: set[str], users: set[str]) 
             continue
         if k in email_keys and v in aliases:
             return True
-        if k in user_keys and v in {_norm_id(u) for u in users}:
+        if k in user_keys and v in normalized_users:
             return True
     return False
 

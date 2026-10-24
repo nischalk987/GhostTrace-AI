@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,14 +67,11 @@ def main() -> int:
     args = parser.parse_args()
     reference_path = args.dataset / "sample_output.csv"
     requests_path = args.dataset / "sample_deletion_requests.csv"
-    production_requests = args.dataset / "deletion_requests.csv"
-    if not reference_path.is_file() or not requests_path.is_file() or not production_requests.is_file():
+    if not reference_path.is_file() or not requests_path.is_file():
         print("evaluator: sample inputs and reference output are required", file=sys.stderr)
         return 2
     try:
         with tempfile.TemporaryDirectory() as td:
-            overlay = Path(td) / "dataset"
-            overlay.mkdir()
             # Run against the provided sample requests without replacing the production
             # dataset file or copying the evidence tree into a temporary directory.
             output = Path(td) / "sample_output.csv"

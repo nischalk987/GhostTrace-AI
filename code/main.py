@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from identity_resolution import IdentityResolver
-from temporal_state import observation_is_eligible
+from temporal_state import TemporalEvent, observation_is_eligible, reconstruct_state, normalize_timestamp
 
 OUTPUT_FIELDS = ["case_id", "deletion_status", "steps_json"]
 STEP_FIELDS = ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]
@@ -284,8 +284,50 @@ def _resource_category(path: str, store: str, collection: str, rid: str) -> str:
         return "marketing"
     return "profile"
 
+def _temporal_resource_state(record: dict[str, Any], category: str) -> str:
+    """Return a state transition only for explicit, recognized state values."""
+    fields = {str(k).casefold(): v for k, v in record.items()}
+    if category == "flow":
+        raw = fields.get("enabled", fields.get("status", fields.get("state", "")))
+        value = _norm_id(raw).upper()
+        if value in {"TRUE", "1", "YES", "ENABLED", "ACTIVE", "RUNNING"}:
+            return "ACTIVE"
+        if value in {"FALSE", "0", "NO", "DISABLED", "INACTIVE", "STOPPED", "PAUSED"}:
+            return "DISABLED"
+    if category == "backup":
+        raw = fields.get("restorable", fields.get("restore_allowed", fields.get("restore_state", fields.get("status", ""))))
+        value = _norm_id(raw).upper()
+        if value in {"TRUE", "1", "YES", "RESTORABLE", "ENABLED", "ACTIVE", "ALLOWED"}:
+            return "ACTIVE"
+        if value in {"FALSE", "0", "NO", "BLOCKED", "NOT_RESTORABLE", "DISABLED", "DENIED", "RESTORE_BLOCKED"}:
+            return "BLOCKED"
+    for key in ("deletion_state", "record_state", "resulting_state", "state", "status"):
+        value = _norm_id(fields.get(key)).upper().replace("-", "_").replace(" ", "_")
+        if value in {"ABSENT", "DELETED", "REMOVED", "PURGED", "NOT_FOUND", "NONEXISTENT", "NON_EXISTENT"}:
+            return "ABSENT"
+        if value in {"REDACTED", "REDACTION_COMPLETE"}:
+            return "REDACTED"
+        if value in {"ANONYMIZED", "ANONYMISED", "DEIDENTIFIED", "DE_IDENTIFIED"}:
+            return "ANONYMIZED"
+        if value in {"PRESENT", "EXISTS", "EXISTING", "LIVE", "RETAINED"}:
+            return "PRESENT"
+    return ""
+
+
+def _resource_observation_time(record: dict[str, Any], captured_at: datetime) -> datetime:
+    """Use explicit event/effective time; otherwise use known snapshot capture time."""
+    for key in ("event_time", "event_timestamp", "occurred_at", "effective_at",
+                "status_at", "observed_at", "timestamp"):
+        raw = record.get(key)
+        if raw is not None and str(raw).strip():
+            return normalize_timestamp(str(raw))
+    return normalize_timestamp(captured_at)
+
+
 def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str],cutoff:datetime|None=None)->list[Resource]:
     found: dict[tuple[str, str, str], Resource] = {}
+    found_order: dict[tuple[str, str, str], tuple[datetime, str]] = {}
+    temporal_events: dict[tuple[str, str], list[TemporalEvent]] = {}
     user_norm = {_norm_id(u) for u in users}
     for hit in hits:
         path = hit.path.casefold()
@@ -341,7 +383,19 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     else:
                         op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("data_store") or store or infer_system(path, rid))
                     key = (sysid, rid, op)
-                    found[key] = Resource(sysid, rid, op, state, hit.file_id)
+                    observed_at = _resource_observation_time(rec, hit.captured_at)
+                    order_key = (observed_at, hit.file_id)
+                    if key not in found_order or order_key > found_order[key]:
+                        found[key] = Resource(sysid, rid, op, state, hit.file_id)
+                        found_order[key] = order_key
+                    resource_state = _temporal_resource_state(rec, category)
+                    if resource_state:
+                        timeline_key = (sysid, rid)
+                        temporal_events.setdefault(timeline_key, []).append(TemporalEvent(
+                            f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                            hit.file_id, hit.path, "SUPPORTED",
+                            f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                        ))
                     structured = True
         elif path.endswith(".sql"):
             # SQL files in this dataset are SQLite text dumps with INSERT rows. To
@@ -400,7 +454,20 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "analytics_platform"
                 else:
                     op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", infer_system(path, rid)
-                found[(sysid, rid, op)] = Resource(sysid, rid, op, state, hit.file_id)
+                key = (sysid, rid, op)
+                observed_at = _resource_observation_time(rec, hit.captured_at)
+                order_key = (observed_at, hit.file_id)
+                if key not in found_order or order_key > found_order[key]:
+                    found[key] = Resource(sysid, rid, op, state, hit.file_id)
+                    found_order[key] = order_key
+                resource_state = _temporal_resource_state(rec, category)
+                if resource_state:
+                    timeline_key = (sysid, rid)
+                    temporal_events.setdefault(timeline_key, []).append(TemporalEvent(
+                        f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                        hit.file_id, hit.path, "SUPPORTED",
+                        f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                    ))
                 structured = True
         if structured:
             continue
@@ -434,7 +501,30 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     op, state = "REPORT_EXPOSED_PII", "PRESENT"
                 else:
                     op, state = "REPORT_REMAINING_RECORD", "PRESENT"
-                found[(sysid, rid, op)] = Resource(sysid, rid, op, state, hit.file_id)
+                key = (sysid, rid, op)
+                found[key] = Resource(sysid, rid, op, state, hit.file_id)
+                found_order[key] = (_resource_observation_time({}, hit.captured_at), hit.file_id)
+    if cutoff is not None:
+        # A later explicit state supersedes a stale positive snapshot for that resource.
+        # Contradictory same-instant states remain uncertain, so findings are retained.
+        suppress: set[str] = set()
+        for (sysid, rid), events in temporal_events.items():
+            result = reconstruct_state(f"{sysid}:{rid}", events, cutoff)
+            if result.certainty != "SUPPORTED":
+                continue
+            if result.state == "ABSENT":
+                suppress.add(f"{sysid}\\0{rid}\\0ALL")
+            elif result.state in {"REDACTED", "ANONYMIZED"}:
+                suppress.add(f"{sysid}\\0{rid}\\0REPORT_EXPOSED_PII")
+            elif result.state == "DISABLED":
+                suppress.add(f"{sysid}\\0{rid}\\0REPORT_ACTIVE_DATA_FLOW")
+            elif result.state == "BLOCKED":
+                suppress.add(f"{sysid}\\0{rid}\\0REPORT_RESTORE_RISK")
+        found = {
+            key: resource for key, resource in found.items()
+            if f"{resource.system_id}\\0{resource.resource_id}\\0ALL" not in suppress
+            and f"{resource.system_id}\\0{resource.resource_id}\\0{resource.operation}" not in suppress
+        }
     return list(found.values())
 
 def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)->dict[str,Any]:

@@ -6,7 +6,7 @@ From the repository root:
 
 ```bash
 python -m unittest discover -s code -p "test_*.py" -v
-python code/evaluate.py --dataset dataset --sample-only
+python code/evaluate.py --dataset dataset
 python code/main.py --validate-only
 ```
 

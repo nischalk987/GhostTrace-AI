@@ -63,7 +63,6 @@ def score(predicted: list[dict[str, str]], expected: list[dict[str, str]]) -> di
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
-    parser.add_argument("--sample-only", action="store_true")
     args = parser.parse_args()
     reference_path = args.dataset / "sample_output.csv"
     requests_path = args.dataset / "sample_deletion_requests.csv"

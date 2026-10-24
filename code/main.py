@@ -142,37 +142,177 @@ def infer_system(path:str,rid:str)->str:
         if term in p: return sysid
     return "account_service"
 
+def _norm_id(value: Any) -> str:
+    return normalize(str(value)) if value is not None else ""
+
+def _contains_subject(record: dict[str, Any], aliases: set[str], tokens: set[str], users: set[str]) -> bool:
+    # Match only explicit identifier fields, never arbitrary substrings in a JSON dump.
+    for key in ("email", "display_email", "old_email", "new_email"):
+        value = _norm_id(record.get(key))
+        if value and value in aliases:
+            return True
+    for key in ("subject_reference", "user_id", "customer_id", "account_user_id"):
+        value = _norm_id(record.get(key))
+        if value and value in {_norm_id(u) for u in users}:
+            return True
+    # Hashes and names are weaker identifiers; require exact field/value equality.
+    for key in ("email_hash", "phone", "name", "display_name", "old_email", "new_email"):
+        value = _norm_id(record.get(key))
+        if value and value in tokens:
+            return True
+    return False
+
+def _walk_records(value: Any, inherited_store: str = "", inherited_collection: str = ""):
+    if isinstance(value, dict):
+        store = str(value.get("data_store") or inherited_store)
+        collection = str(value.get("collection") or inherited_collection)
+        if any(k in value for k in ("resource_id", "record_id", "id")):
+            yield value, store, collection
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _walk_records(child, store, collection)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_records(child, inherited_store, inherited_collection)
+
+def _resource_category(path: str, store: str, collection: str, rid: str) -> str:
+    text = " ".join((path, store, collection, rid)).casefold()
+    if "tombstone" in text or "deleted_customer_reference" in text:
+        return "tombstone"
+    if "security" in text or "audit_record" in text or rid.casefold().startswith("audit_record_"):
+        return "retained"
+    if "legal" in text or "legal_hold" in text:
+        return "retained"
+    if "analytics" in text or "telemetry" in text:
+        return "analytics"
+    if "support" in text or "attachment" in text or "conversation" in text or "ticket" in text:
+        return "support"
+    if "search" in text or rid.casefold().startswith("search_"):
+        return "search"
+    if "cache" in text:
+        return "cache"
+    if "backup" in text or "restore" in text or "archive" in text or "failover" in text:
+        return "backup"
+    if "flow" in text or "connector" in text or "sync" in text or "integration" in text:
+        return "flow"
+    if "export" in text or "object_store" in text:
+        return "export"
+    if "marketing" in text:
+        return "marketing"
+    return "profile"
+
 def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],tokens:set[str])->list[Resource]:
-    found={}
+    found: dict[tuple[str, str, str], Resource] = {}
+    user_norm = {_norm_id(u) for u in users}
     for hit in hits:
-        path=hit.path.casefold()
-        for rec in json_objects(hit.text):
-            blob=json.dumps(rec,ensure_ascii=False).casefold()
-            if not any(t in blob for t in tokens): continue
-            rid=str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
-            if not rid: continue
-            email_val=normalize(str(rec.get("email") or rec.get("display_email") or ""))
-            direct={k:v for k,v in rec.items() if k.casefold() in {"name","email","phone","email_hash","display_name"} and v}
-            if "tombstone" in rid.casefold() and direct:
-                sysid="identity_service"; op="REPORT_EXPOSED_PII"; state="PRESENT"
-                found[(sysid,rid,op)]=Resource(sysid,rid,op,state,hit.file_id)
-            elif email_val in aliases:
-                sysid=str(rec.get("data_store") or rec.get("system_id") or infer_system(path,rid))
-                if "security" in sysid.casefold() or "audit" in rid.casefold(): continue
-                op="REPORT_REMAINING_RECORD"; state="PRESENT"
-                found[(sysid,rid,op)]=Resource(sysid,rid,op,state,hit.file_id)
+        path = hit.path.casefold()
+        structured = False
+        # Evidence JSON and SQL snapshots are parsed conservatively. A whole-file JSON
+        # parse avoids interpreting comments/quoted SQL as actual state.
+        if path.endswith(".json"):
+            try:
+                root = json.loads(hit.text)
+            except json.JSONDecodeError:
+                root = None
+            if root is not None:
+                for rec, store, collection in _walk_records(root):
+                    if not _contains_subject(rec, aliases, tokens, users):
+                        continue
+                    rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
+                    if not rid:
+                        continue
+                    category = _resource_category(path, store, collection, rid)
+                    fields = {str(k).casefold(): v for k, v in rec.items()}
+                    direct = any(_norm_id(fields.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name"))
+                    if category == "retained":
+                        # Policy-retained audit/security records are not residual deletion failures.
+                        continue
+                    if category == "tombstone":
+                        if direct:
+                            op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
+                        else:
+                            continue
+                    elif category == "flow":
+                        enabled = str(fields.get("enabled", fields.get("status", ""))).casefold()
+                        if enabled in {"true", "1", "enabled", "active", "running"}:
+                            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", str(rec.get("system_id") or "integration_service")
+                        else:
+                            continue
+                    elif category == "backup":
+                        restorable = str(fields.get("restorable", fields.get("restore_allowed", fields.get("status", "")))).casefold()
+                        if restorable in {"true", "1", "yes", "restorable", "enabled", "active"}:
+                            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", str(rec.get("system_id") or "backup_service")
+                        else:
+                            continue
+                    elif category == "analytics":
+                        op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "analytics_platform")
+                    elif category == "support":
+                        op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "support_platform")
+                    else:
+                        op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("data_store") or store or infer_system(path, rid))
+                    key = (sysid, rid, op)
+                    found[key] = Resource(sysid, rid, op, state, hit.file_id)
+                    structured = True
+        elif path.endswith(".sql"):
+            # SQL files in this dataset are SQLite text dumps with INSERT rows. To
+            # avoid treating schema/comments as state, inspect parsed INSERT tuples.
+            # Tokens must occur as exact SQL string literals in a row containing a
+            # recognized resource id. The row is associated with the table's store.
+            insert_re = re.compile(r"INSERT\\s+INTO\\s+[`\\\"']?([A-Za-z_][\\w]*)[`\\\"']?\\s*\\(([^)]*)\\)\\s*VALUES\\s*\\((.*?)\\)\\s*;", re.I | re.S)
+            for match in insert_re.finditer(hit.text):
+                table, columns_text, values_text = match.groups()
+                columns = [c.strip().strip('`"[] ') for c in columns_text.split(",")]
+                try:
+                    values = next(csv.reader([values_text], skipinitialspace=True, quotechar="'"))
+                except Exception:
+                    continue
+                if len(columns) != len(values):
+                    continue
+                rec = dict(zip((c.casefold() for c in columns), (v.strip().strip("'\\\"") for v in values)))
+                if not _contains_subject(rec, aliases, tokens, users):
+                    continue
+                rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
+                if not rid:
+                    continue
+                category = _resource_category(path, table, table, rid)
+                if category == "retained":
+                    continue
+                if category == "tombstone":
+                    direct = any(_norm_id(rec.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name"))
+                    if not direct:
+                        continue
+                    op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
+                elif category == "analytics":
+                    op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "analytics_platform"
+                else:
+                    op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", infer_system(path, rid)
+                found[(sysid, rid, op)] = Resource(sysid, rid, op, state, hit.file_id)
+                structured = True
+        if structured:
+            continue
+        # Text evidence: parse each row/line and attach only the evidence identifier
+        # that was captured by the manifest before the case's audit cutoff.
         for line in hit.text.splitlines():
-            low=line.casefold()
-            if not any(t in low for t in tokens): continue
-            ids=re.findall(r"\b(?:account|search|analytics|support|export|backup|tombstone|audit_record|data_flow|cache|marketing|delivery|telemetry|profile)_?\d+\b",line,re.I)
+            low = line.casefold()
+            if not any(alias and alias in low for alias in aliases):
+                continue
+            ids = re.findall(r"\\b(?:account|search|analytics|support|export|backup|tombstone|data_flow|cache|marketing|delivery|telemetry|profile)_?\\d+\\b", line, re.I)
             for rid in ids:
-                if rid.casefold().startswith("audit_record"): continue
-                sysid=infer_system(path,rid)
-                if "sync" in low or "import" in low or "connector" in low: op,state="REPORT_ACTIVE_DATA_FLOW","ACTIVE"
-                elif "restore" in low or "backup" in low: op,state="REPORT_RESTORE_RISK","ACTIVE"
-                elif "tombstone" in rid.casefold() or "redact" in low: op,state="REPORT_EXPOSED_PII","PRESENT"
-                else: op,state="REPORT_REMAINING_RECORD","PRESENT"
-                found[(sysid,rid,op)]=Resource(sysid,rid,op,state,hit.file_id)
+                category = _resource_category(path, "", "", rid)
+                sysid = infer_system(path, rid)
+                if category == "retained":
+                    continue
+                if category == "tombstone" and any(word in low for word in ("name=", "email=", "phone=", "email_hash=")):
+                    op, state = "REPORT_EXPOSED_PII", "PRESENT"
+                elif category == "flow" and any(word in low for word in ("enabled", "active", "running")):
+                    op, state = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE"
+                elif category == "backup" and any(word in low for word in ("restorable", "restore allowed", "can be restored")):
+                    op, state = "REPORT_RESTORE_RISK", "ACTIVE"
+                elif category == "analytics" and any(word in low for word in ("identifiable", "email", "attributable", "user_id")):
+                    op, state = "REPORT_EXPOSED_PII", "PRESENT"
+                else:
+                    op, state = "REPORT_REMAINING_RECORD", "PRESENT"
+                found[(sysid, rid, op)] = Resource(sysid, rid, op, state, hit.file_id)
     return list(found.values())
 
 def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)->dict[str,Any]:

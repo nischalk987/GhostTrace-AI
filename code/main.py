@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from identity_resolution import IdentityResolver
 
 OUTPUT_FIELDS = ["case_id", "deletion_status", "steps_json"]
 STEP_FIELDS = ["step_no", "phase", "system_id", "resource_id", "operation", "state", "evidence_id"]
@@ -104,19 +105,28 @@ def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None
     return hits
 
 def identity_aliases(email:str,identities:list[dict[str,str]],audit:list[dict[str,str]],cutoff:datetime):
-    target=normalize(email); users=set(); aliases={target} if target else set()
-    for r in identities:
-        if normalize(r["email"])==target and parse_time(r["updated_at"])<=cutoff: users.add(r["user_id"])
+    """Resolve one subject conservatively; return no aliases for unknown/conflicted IDs."""
+    result=IdentityResolver(identities,audit).resolve_subject(email, audit_at=cutoff, identifier_type="email")
+    if result.status != "RESOLVED" or result.user_id is None:
+        # Do not let ambiguous historical identifier reuse pull unrelated subjects
+        # into an audit. audit_case maps this empty result to INCOMPLETE, never COMPLETE.
+        return set(),set()
+    user=result.user_id
+    target=normalize(email)
+    aliases={target} if target else set()
     for r in audit:
-        if parse_time(r["event_time"])<=cutoff and r["field_name"].casefold()=="email" and normalize(r["old_value"])==target: users.add(r["user_id"])
-    changed=True
-    while changed:
-        changed=False
-        for r in audit:
-            if parse_time(r["event_time"])>cutoff or r["user_id"] not in users or r["field_name"].casefold()!="email": continue
-            for v in (normalize(r["old_value"]),normalize(r["new_value"])):
-                if v and v not in aliases: aliases.add(v); changed=True
-    return users,aliases
+        if r["user_id"] != user or r["field_name"].casefold() != "email" or parse_time(r["event_time"])>cutoff:
+            continue
+        for value in (normalize(r["old_value"]), normalize(r["new_value"])):
+            if value:
+                aliases.add(value)
+    # Include a current snapshot identifier only when it existed by the cutoff.
+    for r in identities:
+        if r["user_id"] == user and parse_time(r["updated_at"]) <= cutoff:
+            value=normalize(r["email"])
+            if value:
+                aliases.add(value)
+    return {user},aliases
 
 def subject_tokens(users:set[str],aliases:set[str],identities:list[dict[str,str]],audit:list[dict[str,str]],cutoff:datetime)->set[str]:
     tokens=set(aliases)

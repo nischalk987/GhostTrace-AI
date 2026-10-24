@@ -439,16 +439,27 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     if not rid:
                         continue
                     category = _resource_category(path, store, collection, rid)
+                    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
+                    policy_decision = evaluate_record_policy(rec, path, store, rid, policy) if policy is not None else None
                     fields = {str(k).casefold(): v for k, v in rec.items()}
-                    direct = any(_norm_id(fields.get(k)) for k in ("name", "email", "phone", "email_hash", "display_name", "full_name"))
+                    direct = any(_norm_id(fields.get(k)) for k in ("name", "full_name", "display_name", "email", "display_email", "phone", "email_hash"))
                     # Search exports often wrap the hit in a query object and repeat
                     # the resource ID on the parent. A nested document's exact subject
                     # match must classify the parent resource, not only the child.
-                    if category == "retained":
-                        # Policy-retained audit/security records are not residual deletion failures.
+                    # Keep raw evidence facts separate from policy treatment. Unresolved
+                    # legal/retention rules are surfaced as conservative findings when data
+                    # remains; RETAIN never generates a deletion remediation.
+                    if policy_decision is not None and policy_decision.action == "RETAIN":
                         continue
-                    if category == "tombstone":
+                    if category == "retained":
+                        if policy_decision is not None and policy_decision.action == "UNRESOLVED":
+                            op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("system_id") or store or infer_system(path, rid))
+                        else:
+                            continue
+                    elif category == "tombstone":
                         if direct:
+                            op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
+                        elif policy_decision is not None and policy_decision.action == "UNRESOLVED":
                             op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
                         else:
                             continue
@@ -483,10 +494,18 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                                 ))
                             continue
                     elif category == "analytics":
+                        if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                            continue
                         op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "analytics_platform")
                     elif category == "support":
+                        if policy_decision is not None and policy_decision.action == "NOT_APPLICABLE":
+                            continue
                         op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "support_platform")
                     else:
+                        if policy_decision is not None and policy_decision.action in {"NOT_APPLICABLE", "UNRESOLVED"}:
+                            # A matching subject without an applicable policy is not
+                            # silently converted to a destructive finding.
+                            continue
                         op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", str(rec.get("data_store") or store or infer_system(path, rid))
                     key = (sysid, rid, op)
                     observed_at = _resource_observation_time(rec, hit.captured_at)

@@ -437,7 +437,7 @@ def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,An
     results.sort(key=lambda r:r["case_id"]); validate_output(results,{r["case_id"] for r in data["requests"]})
     output.parent.mkdir(parents=True,exist_ok=True)
     with output.open("w",encoding="utf-8",newline="") as f:
-        writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\\n"); writer.writeheader(); writer.writerows(results)
+        writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\n"); writer.writeheader(); writer.writerows(results)
     return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output)}
 
 

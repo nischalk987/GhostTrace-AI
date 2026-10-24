@@ -190,28 +190,44 @@ def _contains_subject(record: dict[str, Any], aliases: set[str], tokens: set[str
             return True
     return False
 
-def _walk_records(value: Any, inherited_store: str = "", inherited_collection: str = ""):
+def _walk_records(value: Any, inherited_store: str = "", inherited_collection: str = "", inherited_resource_id: str = ""):
+    """Yield resource rows, carrying parent IDs to nested payloads.
+
+    Some exports put the email/subject reference in a nested profile/documents
+    object while the enclosing lookup contains the only resource_id. The parent
+    ID is attached only to child mappings containing identity fields, not metrics.
+    """
     if isinstance(value, dict):
         store = str(value.get("data_store") or inherited_store)
         collection = str(value.get("collection") or inherited_collection)
-        # Evidence snapshots commonly nest customer records in multiple service
-        # exports and search "documents" arrays. Preserve the service store/collection.
+        local_id = str(value.get("resource_id") or value.get("record_id") or value.get("id") or "")
+        rid = local_id or inherited_resource_id
+        identity_keys = {
+            "user_id", "subject_reference", "customer_reference", "customer_id",
+            "account_user_id", "owner_user_id", "email", "display_email", "old_email",
+            "new_email", "customer_email", "requester_email", "owner_email",
+            "email_hash", "phone", "name", "full_name", "display_name",
+        }
+        has_identity_field = any(str(k).casefold() in identity_keys and v not in (None, "") for k, v in value.items())
         for key, child in value.items():
-            if isinstance(child, str) and key.casefold() in {"record_json", "payload", "document"}:
+            if isinstance(child, str) and str(key).casefold() in {"record_json", "payload", "document"}:
                 try:
                     parsed = json.loads(child)
                 except json.JSONDecodeError:
                     parsed = None
                 if isinstance(parsed, (dict, list)):
-                    yield from _walk_records(parsed, store, collection)
-        if any(k in value for k in ("resource_id", "record_id", "id")):
-            yield value, store, collection
-        for key, child in value.items():
+                    yield from _walk_records(parsed, store, collection, rid)
+        if local_id or (inherited_resource_id and has_identity_field):
+            row = dict(value)
+            if not local_id and inherited_resource_id:
+                row["resource_id"] = inherited_resource_id
+            yield row, store, collection
+        for child in value.values():
             if isinstance(child, (dict, list)):
-                yield from _walk_records(child, store, collection)
+                yield from _walk_records(child, store, collection, rid)
     elif isinstance(value, list):
         for child in value:
-            yield from _walk_records(child, inherited_store, inherited_collection)
+            yield from _walk_records(child, inherited_store, inherited_collection, inherited_resource_id)
 
 def _resource_category(path: str, store: str, collection: str, rid: str) -> str:
     text = " ".join((path, store, collection, rid)).casefold()

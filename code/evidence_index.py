@@ -315,8 +315,25 @@ class EvidenceIndex:
         # Run actual SQLite-compatible statements in-memory, never scan SQL comments as facts.
         try:
             connection = sqlite3.connect(":memory:")
+            # SQL dumps are input data, not trusted scripts. Permit only local schema/index
+            # creation, inserts, reads and transaction control; deny ATTACH, PRAGMA, triggers,
+            # file operations, extension loading and all other SQL actions.
+            allowed = {
+                sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_INDEX,
+                sqlite3.SQLITE_CREATE_TEMP_TABLE, sqlite3.SQLITE_CREATE_TEMP_INDEX,
+                sqlite3.SQLITE_INSERT, sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ,
+                sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT,
+            }
+            def authorize(action, arg1, arg2, database_name, trigger_name):
+                if action in allowed:
+                    return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_UPDATE and str(arg1).casefold() == "sqlite_sequence":
+                    return sqlite3.SQLITE_OK
+                return sqlite3.SQLITE_DENY
+            connection.set_authorizer(authorize)
             try:
                 connection.executescript(content)
+                connection.set_authorizer(None)
                 for table_name, in connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
                     quoted_table = '"' + table_name.replace('"', '""') + '"'
                     cursor = connection.execute(f"SELECT * FROM {quoted_table}")

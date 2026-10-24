@@ -716,9 +716,9 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
     return list(found.values())
 
 def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)->dict[str,Any]:
+    """Construct one schema-valid step; the sequence validator checks case-level rules."""
     s={"step_no":n,"phase":phase,"system_id":system,"resource_id":rid,"operation":op,"state":state,"evidence_id":evidence}
-    if list(s)!=STEP_FIELDS or (phase,op,state) not in ALLOWED: raise InputError(f"Invalid step: {s}")
-    if phase=="FINDING" and not evidence: raise InputError("Finding must cite evidence")
+    validate_step_sequence([s], "step")
     return s
 
 def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[str,Any]]:
@@ -793,24 +793,49 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
     # have enough information to assert COMPLETE by itself.
     return "INCOMPLETE", plan
 
-def _validate_steps(steps: list[dict[str, Any]], case_id: str) -> None:
+def validate_step_sequence(steps: list[dict[str, Any]], case_id: str = "<sequence>") -> None:
+    """Validate the complete step contract for plans, tests, and final output generation."""
+    if not isinstance(steps, list):
+        raise InputError(f"steps_json must be a JSON array for {case_id}")
     phase_order = {"FINDING": 0, "REMEDIATION": 1, "VERIFICATION": 2}
     last_phase = -1
+    previous_sort_key: dict[str, tuple[Any, ...]] = {}
     for i, step in enumerate(steps, 1):
         if not isinstance(step, dict) or list(step) != STEP_FIELDS:
             raise InputError(f"Invalid step schema for {case_id} at position {i}")
-        if step["step_no"] != i:
-            raise InputError(f"Invalid step numbering for {case_id}")
-        if (step["phase"], step["operation"], step["state"]) not in ALLOWED:
+        if type(step["step_no"]) is not int or step["step_no"] != i:
+            raise InputError(f"Invalid step numbering for {case_id}: expected {i}")
+        if any(not isinstance(step[k], str) or not step[k].strip()
+               for k in ("phase", "system_id", "resource_id", "operation", "state")):
+            raise InputError(f"Step has empty or non-string required field for {case_id} at position {i}")
+        if not isinstance(step["evidence_id"], str):
+            raise InputError(f"evidence_id must be a string for {case_id} at position {i}")
+        phase, operation, state = step["phase"], step["operation"], step["state"]
+        if phase not in phase_order:
+            raise InputError(f"Invalid phase for {case_id}: {phase!r}")
+        if (phase, operation, state) not in ALLOWED:
             raise InputError(f"Invalid operation/state for {case_id}: {step}")
-        rank = phase_order[step["phase"]]
+        rank = phase_order[phase]
         if rank < last_phase:
             raise InputError(f"Invalid phase order for {case_id}")
         last_phase = rank
-        if step["phase"] == "FINDING" and not step["evidence_id"]:
+        if phase == "FINDING" and not step["evidence_id"].strip():
             raise InputError(f"Finding must cite evidence for {case_id}")
-        if step["phase"] != "FINDING" and step["evidence_id"]:
+        if phase != "FINDING" and step["evidence_id"]:
             raise InputError(f"Proposed future action must not cite existing evidence for {case_id}")
+        if phase == "VERIFICATION" and state in {"ABSENT", "REDACTED", "ANONYMIZED", "DISABLED", "BLOCKED"}:
+            # These states are the required target, but completed verification may only
+            # be evidence-backed (enforced by validate_output for COMPLETE cases).
+            pass
+        sort_key = (OP_ORDER[operation], step["system_id"], step["resource_id"])
+        if phase in previous_sort_key and sort_key < previous_sort_key[phase]:
+            raise InputError(f"Steps are not in canonical operation/system/resource order for {case_id}")
+        previous_sort_key[phase] = sort_key
+
+
+# Backwards-compatible internal alias; both tests and generation use the public validator.
+def _validate_steps(steps: list[dict[str, Any]], case_id: str) -> None:
+    validate_step_sequence(steps, case_id)
 def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
     if not rows or list(rows[0])!=OUTPUT_FIELDS: raise InputError("Output header mismatch")
     ids=[r["case_id"] for r in rows]
@@ -819,11 +844,14 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
     for row in rows:
         if row["deletion_status"] not in STATUSES: raise InputError(f"Invalid status {row['deletion_status']}")
         try: steps=json.loads(row["steps_json"])
-        except json.JSONDecodeError as e: raise InputError(f"Invalid JSON for {row['case_id']}") from e
-        if not isinstance(steps,list): raise InputError("steps_json must be a JSON array")
-        if row["deletion_status"]=="NOT_APPLICABLE" and steps: raise InputError("NOT_APPLICABLE must have []")
-        if row["deletion_status"]=="COMPLETE" and (not steps or any(s["phase"]!="VERIFICATION" or not s["evidence_id"] for s in steps)): raise InputError("COMPLETE requires non-empty, evidence-backed verification-only steps")
-        _validate_steps(steps, row["case_id"])
+        except (json.JSONDecodeError, TypeError) as e: raise InputError(f"Invalid JSON for {row['case_id']}") from e
+        validate_step_sequence(steps, row["case_id"])
+        if row["deletion_status"]=="NOT_APPLICABLE" and steps:
+            raise InputError("NOT_APPLICABLE must have []")
+        if row["deletion_status"]=="COMPLETE" and (
+            not steps or any(s["phase"]!="VERIFICATION" or not s["evidence_id"] for s in steps)
+        ):
+            raise InputError("COMPLETE requires non-empty, evidence-backed verification-only steps")
 
 def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
     data=load_inputs(dataset,requests_file); results=[]
@@ -840,6 +868,11 @@ def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,An
         cutoff=parse_time(case["audit_at"])
         case_evidence=[hit for hit in evidence_cache if hit.captured_at<=cutoff]
         status,steps=audit_case(case,data,dataset,case_evidence,policy_path=policy_path)
+        validate_step_sequence(steps, case["case_id"])
+        if status == "NOT_APPLICABLE" and steps:
+            raise InputError(f"NOT_APPLICABLE must have [] for {case['case_id']}")
+        if status == "COMPLETE" and (not steps or any(s["phase"] != "VERIFICATION" or not s["evidence_id"] for s in steps)):
+            raise InputError(f"COMPLETE requires evidence-backed verification-only steps for {case['case_id']}")
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
     valid_ids=evidence_index.manifest_ids()
     activity_ids={str(row.get("activity_id","")).strip() for row in data["activity"]}

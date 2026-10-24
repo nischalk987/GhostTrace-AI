@@ -4,7 +4,7 @@ from pathlib import Path
 
 from main import (
     InputError, Resource, _walk_records, build_plan, identity_aliases,
-    parse_time, request_authorizes_deletion, read_evidence, validate_output,
+    parse_time, request_authorizes_deletion, read_evidence, validate_output, classify_resources, EvidenceHit,
 )
 
 class EngineRegressionTests(unittest.TestCase):
@@ -86,6 +86,38 @@ class EngineRegressionTests(unittest.TestCase):
         self.assertEqual(phases, sorted(phases))
         self.assertTrue(all(s["evidence_id"] for s in plan if s["phase"] == "FINDING"))
         self.assertTrue(all(not s["evidence_id"] for s in plan if s["phase"] != "FINDING"))
+
+
+    def test_resource_classifier_excludes_future_and_malformed_record_events(self):
+        from datetime import datetime, timezone
+        future = EvidenceHit(
+            "e-future", "evidence/records/future.json",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            json.dumps({"resource_id": "search_future", "email": "a@example.com",
+                        "event_time": "2026-02-01T00:00:00Z"})
+        )
+        malformed = EvidenceHit(
+            "e-bad", "evidence/records/bad.json",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            json.dumps({"resource_id": "search_bad", "email": "a@example.com",
+                        "event_time": "not-a-time"})
+        )
+        cutoff = parse_time("2026-01-15T00:00:00Z")
+        resources = classify_resources([future, malformed], {"u1"}, {"a@example.com"},
+                                       {"a@example.com"}, cutoff=cutoff)
+        self.assertEqual(resources, [])
+
+    def test_resource_classifier_includes_event_exactly_at_cutoff(self):
+        from datetime import datetime, timezone
+        hit = EvidenceHit(
+            "e-boundary", "evidence/records/boundary.json",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            json.dumps({"resource_id": "search_boundary", "email": "a@example.com",
+                        "event_time": "2026-01-15T00:00:00Z"})
+        )
+        resources = classify_resources([hit], {"u1"}, {"a@example.com"},
+                                       {"a@example.com"}, cutoff=parse_time("2026-01-15T00:00:00Z"))
+        self.assertTrue(any(r.resource_id == "search_boundary" for r in resources))
 
     def test_output_rejects_invalid_status(self):
         with self.assertRaises(InputError):

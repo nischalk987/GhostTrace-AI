@@ -93,17 +93,18 @@ class Resource:
     evidence_id:str
 
 def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None=None)->list[EvidenceHit]:
+    """Compatibility adapter over the reusable, manifest-backed evidence index."""
+    index = EvidenceIndex(dataset).build()
+    # Keep the existing function API for the current classifier, while all manifest
+    # scanning, safe path checks and diagnostics live in the shared index.
     hits=[]
-    for e in manifest:
-        captured=parse_time(e["captured_at"])
-        if cutoff is not None and captured>cutoff: continue
-        rel=e["file_path"].replace("\\","/").lstrip("/")
-        path=(dataset/rel).resolve()
-        if not path.is_relative_to(dataset.resolve()) or not path.is_file(): continue
-        if path.suffix.lower() not in {".txt",".log",".json",".sql",".csv",".md"}: continue
-        try: content=path.read_text(encoding="utf-8",errors="replace")
-        except OSError: continue
-        hits.append(EvidenceHit(e["file_id"],rel,captured,content))
+    for document in index.documents.values():
+        if document.status != "INDEXED":
+            continue
+        if cutoff is not None and document.captured_at > cutoff:
+            continue
+        hits.append(EvidenceHit(document.file_id, document.file_path, document.captured_at, document.text))
+    hits.sort(key=lambda h:(h.captured_at,h.file_id,h.path))
     return hits
 
 def identity_aliases(email:str,identities:list[dict[str,str]],audit:list[dict[str,str]],cutoff:datetime):

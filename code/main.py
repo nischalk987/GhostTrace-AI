@@ -296,7 +296,7 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
             low = line.casefold()
             if not any(alias and alias in low for alias in aliases):
                 continue
-            ids = re.findall(r"\\b(?:account|search|analytics|support|export|backup|tombstone|data_flow|cache|marketing|delivery|telemetry|profile)_?\\d+\\b", line, re.I)
+            ids = re.findall(r"\b(?:account|search|analytics|support|export|backup|tombstone|data_flow|cache|marketing|delivery|telemetry|profile)_?\d+\b", line, re.I)
             for rid in ids:
                 category = _resource_category(path, "", "", rid)
                 sysid = infer_system(path, rid)

@@ -698,11 +698,24 @@ def make_step(n:int,phase:str,system:str,rid:str,op:str,state:str,evidence:str)-
     if phase=="FINDING" and not evidence: raise InputError("Finding must cite evidence")
     return s
 
-def build_plan(resources:list[Resource])->list[dict[str,Any]]:
+def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[str,Any]]:
     unique=[]; seen=set()
     for r in sorted(resources,key=lambda x:(OP_ORDER.get(x.operation,99),x.system_id,x.resource_id)):
         k=(r.system_id,r.resource_id,r.operation)
         if k not in seen: seen.add(k); unique.append(r)
+    policy = DeletionPolicy.from_csv(policy_path) if policy_path is not None else None
+    if policy is not None:
+        filtered = []
+        for resource in unique:
+            category = record_policy_category("", resource.system_id, "", resource.resource_id)
+            # A retention-oriented system/category is never turned into a delete
+            # remediation merely because a generic residual-record detector fired.
+            if category in {"SECURITY_AUDIT_LOG", "LEGAL_HOLD_RECORD", "BACKUP_ARCHIVE"}:
+                decision = policy.decide(category, {})
+                if decision.action in {"RETAIN", "UNRESOLVED"}:
+                    continue
+            filtered.append(resource)
+        unique = filtered
     steps=[]
     for r in unique: steps.append(make_step(len(steps)+1,"FINDING",r.system_id,r.resource_id,r.operation,r.state,r.evidence_id))
     rem=[]; ver=[]
@@ -740,7 +753,7 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
     hits = [h for h in evidence_cache if h.captured_at <= cutoff]
     resources = classify_resources(hits, users, aliases, tokens, cutoff=cutoff, policy_path=policy_path)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
-    plan = build_plan(resources)
+    plan = build_plan(resources, policy_path=policy_path)
 
     # A clean result requires explicit negative-state evidence for the account and
     # any policy-relevant retained resources. The positive-evidence scanner does not

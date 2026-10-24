@@ -258,10 +258,18 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
             # avoid treating schema/comments as state, inspect parsed INSERT tuples.
             # Tokens must occur as exact SQL string literals in a row containing a
             # recognized resource id. The row is associated with the table's store.
-            insert_re = re.compile(r"INSERT\s+INTO\s+[`\"]?([A-Za-z_][\w]*)[`\"]?\s*\(([^)]*)\)\s*VALUES\s*\((.*?)\)\s*;", re.I | re.S)
+            insert_re = re.compile(r"INSERT\s+INTO\s+[`\"]?([A-Za-z_][\w]*)[`\"]?(?:\s*\(([^)]*)\))?\s*VALUES\s*\((.*?)\)\s*;", re.I | re.S)
             for match in insert_re.finditer(hit.text):
                 table, columns_text, values_text = match.groups()
-                columns = [c.strip().strip('`"[] ') for c in columns_text.split(",")]
+                columns = ([c.strip().strip('`"[] ') for c in columns_text.split(",")]
+                           if columns_text else [])
+                if not columns:
+                    # SQLite allows INSERT INTO table VALUES(...) without a column list;
+                    # use the table definition preceding this row to recover column names.
+                    table_match = re.search(r"CREATE\\s+TABLE\\s+[`\"]?" + re.escape(table) + r"[`\"]?\\s*\\((.*?)\\)\\s*;", hit.text, re.I | re.S)
+                    if not table_match:
+                        continue
+                    columns = re.findall(r"^\\s*([A-Za-z_][\\w]*)\\s+(?:TEXT|INTEGER|REAL|BLOB|NUMERIC)", table_match.group(1), re.I | re.M)
                 try:
                     values = next(csv.reader([values_text], skipinitialspace=True, quotechar="'"))
                 except Exception:

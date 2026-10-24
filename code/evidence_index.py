@@ -79,12 +79,7 @@ class EvidenceDocument:
 
 
 class EvidenceIndex:
-    """Read a manifest once, inspect content, and expose queryable evidence facts.
-
-    The index does not use filenames or manifest origins as proof. They provide
-    storage location and context only; facts are emitted from parsed content.
-    """
-
+    """Read a manifest once, inspect content, and expose queryable evidence facts."""
     def __init__(self, dataset_root: str | Path, manifest_path: str | Path | None = None):
         self.dataset_root = Path(dataset_root).resolve()
         self.manifest_path = Path(manifest_path).resolve() if manifest_path else self.dataset_root / "evidence_files.csv"
@@ -124,6 +119,7 @@ class EvidenceIndex:
                 self._diag(file_id, raw_path, "UNSAFE_PATH", path_error)
                 self.documents[file_id] = EvidenceDocument(file_id, raw_path, origin, captured_at, "UNSAFE_PATH")
                 continue
+            assert safe_path is not None
             relative = safe_path.relative_to(self.dataset_root).as_posix()
             if relative in seen_paths:
                 self._diag(file_id, raw_path, "DUPLICATE_PATH", "Multiple manifest entries refer to the same resolved evidence path")
@@ -146,8 +142,8 @@ class EvidenceIndex:
                     facts = self._extract_text_facts(file_id, relative, captured_at, digest, suffix, text_value)
                     doc = EvidenceDocument(file_id, relative, origin, captured_at, "INDEXED", digest, text_value, tuple(facts))
                     self.facts.extend(facts)
+                    self._by_file[file_id] = list(facts)
                     for fact in facts:
-                        self._by_file.setdefault(file_id, []).append(fact)
                         if fact.resource_id:
                             self._by_resource.setdefault(fact.resource_id.casefold(), []).append(fact)
                         for key, value in fact.subject_identifiers:
@@ -160,7 +156,6 @@ class EvidenceIndex:
             except (OSError, UnicodeError, sqlite3.Error) as exc:
                 self._diag(file_id, relative, "READ_OR_PARSE_ERROR", f"{type(exc).__name__}: {exc}")
                 self.documents[file_id] = EvidenceDocument(file_id, relative, origin, captured_at, "ERROR")
-        # Stable order makes query results reproducible independent of dict insertion details.
         self.facts.sort(key=lambda f: (f.captured_at, f.file_id, f.source_line or 0, f.source_row or 0,
                                        f.field_name, f.value, f.resource_id))
         for index in (self._by_subject, self._by_resource, self._by_file):
@@ -193,10 +188,7 @@ class EvidenceIndex:
         normalized = raw.replace("\\", "/")
         candidate = Path(normalized)
         if candidate.is_absolute() or re.match(r"^[A-Za-z]:", normalized):
-            # A manifest path may be evidence/... relative to dataset, or dataset/evidence/...
-            if candidate.is_absolute():
-                return None, "Absolute paths are not allowed"
-            return None, "Drive-qualified paths are not allowed"
+            return None, "Absolute or drive-qualified paths are not allowed"
         parts = [p for p in normalized.split("/") if p not in {"", "."}]
         if not parts or any(p == ".." for p in parts):
             return None, "Empty or parent-traversal path is not allowed"
@@ -226,12 +218,8 @@ class EvidenceIndex:
                 return []
             self._walk_json(root, file_id, path, captured_at, digest, facts)
         elif suffix == ".csv":
-            try:
-                reader = csv.DictReader(content.splitlines())
-                for row_num, row in enumerate(reader, start=2):
-                    self._row_to_facts(row, file_id, path, captured_at, digest, None, row_num, facts)
-            except csv.Error as exc:
-                self._diag(file_id, path, "CORRUPT_CSV", str(exc))
+            for row_num, row in enumerate(csv.DictReader(content.splitlines()), start=2):
+                self._row_to_facts(row, file_id, path, captured_at, digest, None, row_num, facts)
         elif suffix == ".sql":
             self._extract_sql(content, file_id, path, captured_at, digest, facts)
         elif suffix in {".log", ".txt", ".md"}:
@@ -243,7 +231,7 @@ class EvidenceIndex:
                    facts: list[EvidenceFact], parent: Mapping[str, Any] | None = None) -> None:
         if isinstance(value, dict):
             merged = dict(value)
-            # Exact, explicit subject keys only. Do not inherit arbitrary text or PII from unrelated siblings.
+            # Inherit only system context, not subject identifiers or PII from sibling records.
             for k, v in (parent or {}).items():
                 if str(k).casefold() in {"system_id", "data_store", "source_system", "target_system"} and not merged.get(k):
                     merged[k] = v
@@ -251,7 +239,7 @@ class EvidenceIndex:
             for child in value.values():
                 if isinstance(child, (dict, list)):
                     self._walk_json(child, file_id, path, captured_at, digest, facts, merged)
-                elif isinstance(child, str) and child[:1] in {"{", "["} and str(child).strip():
+                elif isinstance(child, str) and child.strip()[:1] in {"{", "["}:
                     try:
                         parsed = json.loads(child)
                     except json.JSONDecodeError:
@@ -265,10 +253,10 @@ class EvidenceIndex:
     def _row_to_facts(self, row: Mapping[str, Any], file_id: str, path: str, captured_at: datetime,
                       digest: str, line: int | None, row_num: int | None, facts: list[EvidenceFact]) -> None:
         fields = {str(k).casefold(): v for k, v in row.items()}
-        resource_id = next((str(fields[k]).strip() for k in RESOURCE_KEYS if fields.get(k) not in (None, "")), "")
-        system_id = next((str(fields[k]).strip() for k in SYSTEM_KEYS if fields.get(k) not in (None, "")), "")
+        resource_id = next((str(fields[k]).strip() for k in sorted(RESOURCE_KEYS) if fields.get(k) not in (None, "")), "")
+        system_id = next((str(fields[k]).strip() for k in sorted(SYSTEM_KEYS) if fields.get(k) not in (None, "")), "")
         event_time = None
-        for key in TIMESTAMP_KEYS:
+        for key in sorted(TIMESTAMP_KEYS):
             if fields.get(key):
                 try:
                     event_time = parse_timestamp(str(fields[key]))
@@ -276,7 +264,6 @@ class EvidenceIndex:
                 except ValueError:
                     continue
         subject = tuple(sorted((k, str(fields[k]).strip()) for k in IDENTITY_KEYS if fields.get(k) not in (None, "")))
-        emitted: set[tuple[str, str, str]] = set()
         for key, value in sorted(fields.items()):
             if value in (None, ""):
                 continue
@@ -295,32 +282,21 @@ class EvidenceIndex:
                 fact_type = "STATE_OR_EVENT"
             else:
                 fact_type = "FIELD"
-            dedupe_key = (key, normalize_value(rendered), fact_type)
-            if dedupe_key in emitted:
-                continue
-            emitted.add(dedupe_key)
             facts.append(EvidenceFact(fact_type, rendered, key, file_id, path, captured_at, line, row_num,
                                       system_id, resource_id, subject, event_time, digest))
 
     def _extract_line_facts(self, line: str, file_id: str, path: str, captured_at: datetime,
                             digest: str, line_no: int, facts: list[EvidenceFact]) -> None:
-        # Key-value tokens are extracted only when the line contains an actual value.
         pairs = re.findall(r"(?i)([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]\s*([^,;|]+)", line)
         context = " ".join(line.split())
         if not pairs:
-            # Preserve a source-line fact for traceability, but do not turn filenames into facts.
             if context:
                 facts.append(EvidenceFact("TEXT_LINE", context, "_text", file_id, path, captured_at,
                                           line_no, None, "", "", (), None, digest))
             return
         normalized_pairs = {k.casefold(): v.strip().strip('"\' ') for k, v in pairs if v.strip().strip('"\' ')}
         row = dict(normalized_pairs)
-        for key, value in row.items():
-            if key in IDENTITY_KEYS | RESOURCE_KEYS | SYSTEM_KEYS | TIMESTAMP_KEYS:
-                # A line can contain several explicit identifier fields and a resource/event.
-                pass
         self._row_to_facts(row, file_id, path, captured_at, digest, line_no, None, facts)
-        # Keep the original line as a separate fact so investigator can inspect context.
         if context:
             facts.append(EvidenceFact("TEXT_LINE", context, "_text", file_id, path, captured_at,
                                       line_no, None, "", str(row.get("resource_id") or row.get("id") or ""),
@@ -329,8 +305,7 @@ class EvidenceIndex:
 
     def _extract_sql(self, content: str, file_id: str, path: str, captured_at: datetime,
                      digest: str, facts: list[EvidenceFact]) -> None:
-        # Parse plain SQL dump DDL/INSERTs using SQLite in a temporary in-memory DB.
-        # This avoids matching string fragments in comments or malformed SQL.
+        # Run actual SQLite-compatible statements in-memory, never scan SQL comments as facts.
         try:
             connection = sqlite3.connect(":memory:")
             try:
@@ -340,28 +315,22 @@ class EvidenceIndex:
                     cursor = connection.execute(f"SELECT * FROM {quoted_table}")
                     columns = [description[0] for description in cursor.description or ()]
                     for row_num, values in enumerate(cursor.fetchall(), start=1):
-                        row = dict(zip(columns, values))
-                        self._row_to_facts(row, file_id, path, captured_at, digest, None, row_num, facts)
+                        self._row_to_facts(dict(zip(columns, values)), file_id, path, captured_at, digest, None, row_num, facts)
             finally:
                 connection.close()
         except sqlite3.Error as exc:
-            # Some dumps have non-SQLite syntax; preserve diagnostic instead of silently ignoring.
             self._diag(file_id, path, "SQL_PARSE_ERROR", f"{type(exc).__name__}: {exc}")
 
     def query_subject(self, identifier_type: str, identifier: str, cutoff: str | datetime | None = None) -> list[EvidenceFact]:
         self.build()
-        if cutoff is not None:
-            at = parse_timestamp(cutoff)
-        else:
-            at = None
+        at = parse_timestamp(cutoff) if cutoff is not None else None
         hits = self._by_subject.get((identifier_type.casefold(), normalize_value(identifier)), [])
         return [fact for fact in hits if at is None or fact.captured_at <= at]
 
     def query_resource(self, resource_id: str, cutoff: str | datetime | None = None) -> list[EvidenceFact]:
         self.build()
         at = parse_timestamp(cutoff) if cutoff is not None else None
-        hits = self._by_resource.get(resource_id.casefold(), [])
-        return [fact for fact in hits if at is None or fact.captured_at <= at]
+        return [fact for fact in self._by_resource.get(resource_id.casefold(), []) if at is None or fact.captured_at <= at]
 
     def query_file(self, file_id: str) -> list[EvidenceFact]:
         self.build()
@@ -369,10 +338,12 @@ class EvidenceIndex:
 
     def manifest_ids(self) -> set[str]:
         self.build()
-        return {file_id for file_id, document in self.documents.items() if document.status not in {"MISSING", "UNSAFE_PATH"}}
+        return {file_id for file_id, document in self.documents.items()
+                if document.status not in {"MISSING", "UNSAFE_PATH", "ERROR"}}
 
     def stats(self) -> dict[str, int]:
         self.build()
-        return {"documents": len(self.documents), "indexed_documents": sum(d.status == "INDEXED" for d in self.documents.values()),
+        return {"documents": len(self.documents),
+                "indexed_documents": sum(d.status == "INDEXED" for d in self.documents.values()),
                 "facts": len(self.facts), "diagnostics": len(self.diagnostics),
                 "unparsed_binary": sum(d.status == "BINARY_UNPARSED" for d in self.documents.values())}

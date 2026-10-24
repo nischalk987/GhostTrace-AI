@@ -165,16 +165,17 @@ def _norm_id(value: Any) -> str:
 
 def _contains_subject(record: dict[str, Any], aliases: set[str], tokens: set[str], users: set[str]) -> bool:
     # Match only explicit identifier fields, never arbitrary substrings in a JSON dump.
-    for key in ("email", "display_email", "old_email", "new_email"):
+    for key in ("email", "display_email", "old_email", "new_email", "customer_email", "requester_email", "owner_email"):
         value = _norm_id(record.get(key))
         if value and value in aliases:
             return True
-    for key in ("subject_reference", "user_id", "customer_id", "account_user_id"):
+    normalized_users = {_norm_id(u) for u in users}
+    for key in ("subject_reference", "user_id", "customer_id", "account_user_id", "customer_reference", "owner_user_id"):
         value = _norm_id(record.get(key))
-        if value and value in {_norm_id(u) for u in users}:
+        if value and value in normalized_users:
             return True
     # Hashes and names are weaker identifiers; require exact field/value equality.
-    for key in ("email_hash", "phone", "name", "display_name", "old_email", "new_email"):
+    for key in ("email_hash", "phone", "name", "full_name", "display_name", "old_email", "new_email"):
         value = _norm_id(record.get(key))
         if value and value in tokens:
             return True

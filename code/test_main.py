@@ -40,11 +40,12 @@ class EngineRegressionTests(unittest.TestCase):
     def test_evidence_after_cutoff_is_excluded(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            (root / "before.txt").write_text("before", encoding="utf-8")
-            (root / "after.txt").write_text("after", encoding="utf-8")
+            (root / "evidence").mkdir()
+            (root / "evidence" / "before.txt").write_text("before", encoding="utf-8")
+            (root / "evidence" / "after.txt").write_text("after", encoding="utf-8")
             manifest = [
-                {"file_id":"e1","file_path":"before.txt","captured_at":"2026-01-01T00:00:00Z"},
-                {"file_id":"e2","file_path":"after.txt","captured_at":"2026-02-01T00:00:00Z"},
+                {"file_id":"e1","file_path":"evidence/before.txt","captured_at":"2026-01-01T00:00:00Z"},
+                {"file_id":"e2","file_path":"evidence/after.txt","captured_at":"2026-02-01T00:00:00Z"},
             ]
             hits = read_evidence(root, manifest, parse_time("2026-01-15T00:00:00Z"))
             self.assertEqual([h.file_id for h in hits], ["e1"])

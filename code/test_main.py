@@ -119,6 +119,43 @@ class EngineRegressionTests(unittest.TestCase):
                                        {"a@example.com"}, cutoff=parse_time("2026-01-15T00:00:00Z"))
         self.assertTrue(any(r.resource_id == "search_boundary" for r in resources))
 
+
+    def test_later_absent_snapshot_supersedes_older_positive_snapshot(self):
+        from datetime import datetime, timezone
+        old = EvidenceHit(
+            "ev-old", "evidence/records/search_snapshot.json",
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            json.dumps({"resource_id":"search_1","email":"a@example.com",
+                        "state":"PRESENT","event_time":"2026-01-01T00:00:00Z"})
+        )
+        new = EvidenceHit(
+            "ev-new", "evidence/records/search_snapshot.json",
+            datetime(2026, 1, 3, tzinfo=timezone.utc),
+            json.dumps({"resource_id":"search_1","email":"a@example.com",
+                        "state":"ABSENT","event_time":"2026-01-03T00:00:00Z"})
+        )
+        cutoff = parse_time("2026-01-04T00:00:00Z")
+        resources = classify_resources([new, old], {"u1"}, {"a@example.com"},
+                                       {"a@example.com"}, cutoff=cutoff)
+        self.assertEqual(resources, [])
+
+    def test_conflicting_same_time_state_keeps_conservative_finding(self):
+        from datetime import datetime, timezone
+        t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        present = EvidenceHit(
+            "ev-a", "evidence/records/search_snapshot.json", t,
+            json.dumps({"resource_id":"search_1","email":"a@example.com",
+                        "state":"PRESENT","event_time":"2026-01-01T00:00:00Z"})
+        )
+        absent = EvidenceHit(
+            "ev-b", "evidence/records/search_snapshot.json", t,
+            json.dumps({"resource_id":"search_1","email":"a@example.com",
+                        "state":"ABSENT","event_time":"2026-01-01T00:00:00Z"})
+        )
+        resources = classify_resources([present, absent], {"u1"}, {"a@example.com"},
+                                       {"a@example.com"}, cutoff=parse_time("2026-01-02T00:00:00Z"))
+        self.assertTrue(any(r.resource_id == "search_1" for r in resources))
+
     def test_output_rejects_invalid_status(self):
         with self.assertRaises(InputError):
             validate_output([{"case_id":"case_1","deletion_status":"UNKNOWN","steps_json":"[]"}], {"case_1"})

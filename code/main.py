@@ -54,8 +54,8 @@ def request_authorizes_deletion(text: str)->bool:
     if re.search(r"(?i)\b(?:supprim|elimin|exclus|exclusão|elimina|borrar|eliminar|cancelar|삭제|消除|削除|删除)\w*",s): return True
     return bool(DELETE_RE.search(s))
 
-def load_inputs(dataset: Path)->dict[str,Any]:
-    requests=read_csv(dataset/"deletion_requests.csv",["case_id","email","requested_at","reported_status","reported_at","audit_at","request_text"])
+def load_inputs(dataset: Path, requests_file: Path | None = None)->dict[str,Any]:
+    requests=read_csv(requests_file or (dataset/"deletion_requests.csv"),["case_id","email","requested_at","reported_status","reported_at","audit_at","request_text"])
     identities=read_csv(dataset/"user_identities.csv",["user_id","name","email","phone","email_hash","updated_at"])
     audit=read_csv(dataset/"user_audit_log.csv",["audit_id","user_id","event_time","field_name","old_value","new_value"])
     activity=read_csv(dataset/"system_activity.csv",["activity_id","event_time","event_type","source_system","target_system","resource_id","reported_result","details"])
@@ -81,11 +81,11 @@ class Resource:
     state:str
     evidence_id:str
 
-def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime)->list[EvidenceHit]:
+def read_evidence(dataset:Path,manifest:list[dict[str,str]],cutoff:datetime|None=None)->list[EvidenceHit]:
     hits=[]
     for e in manifest:
         captured=parse_time(e["captured_at"])
-        if captured>cutoff: continue
+        if cutoff is not None and captured>cutoff: continue
         rel=e["file_path"].replace("\\","/").lstrip("/")
         path=(dataset/rel).resolve()
         if not path.is_relative_to(dataset.resolve()) or not path.is_file(): continue
@@ -388,7 +388,7 @@ def _activity_resources(case: dict[str, str], data: dict[str, Any], users: set[s
     # Resource-specific evidence files provide the evidence-linked findings.
     return []
 
-def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path)->tuple[str,list[dict[str,Any]]]:
+def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache:list[EvidenceHit])->tuple[str,list[dict[str,Any]]]:
     cutoff = parse_time(case["audit_at"])
     if not request_authorizes_deletion(case["request_text"]):
         return "NOT_APPLICABLE", []
@@ -399,7 +399,7 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path)->tuple[str,li
         return "INCOMPLETE", []
 
     tokens = subject_tokens(users, aliases, data["identities"], data["audit"], cutoff)
-    hits = read_evidence(dataset, data["manifest"], cutoff)
+    hits = [h for h in evidence_cache if h.captured_at <= cutoff]
     resources = classify_resources(hits, users, aliases, tokens)
     resources.extend(_activity_resources(case, data, users, aliases, cutoff))
     plan = build_plan(resources)
@@ -426,25 +426,28 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
             if (s["phase"],s["operation"],s["state"]) not in ALLOWED: raise InputError("Invalid operation/state")
             if s["phase"]=="FINDING" and not s["evidence_id"]: raise InputError("Finding must cite evidence")
 
-def generate(dataset:Path,output:Path)->dict[str,Any]:
-    data=load_inputs(dataset); results=[]
+def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
+    data=load_inputs(dataset,requests_file); results=[]
+    max_cutoff=max(parse_time(r["audit_at"]) for r in data["requests"])
+    evidence_cache=read_evidence(dataset,data["manifest"],max_cutoff)
     for case in data["requests"]:
-        status,steps=audit_case(case,data,dataset)
+        status,steps=audit_case(case,data,dataset,evidence_cache)
         results.append({"case_id":case["case_id"],"deletion_status":status,"steps_json":json.dumps(steps,ensure_ascii=False,separators=(",",":"))})
     results.sort(key=lambda r:r["case_id"]); validate_output(results,{r["case_id"] for r in data["requests"]})
     output.parent.mkdir(parents=True,exist_ok=True)
     with output.open("w",encoding="utf-8",newline="") as f:
-        writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\n"); writer.writeheader(); writer.writerows(results)
+        writer=csv.DictWriter(f,fieldnames=OUTPUT_FIELDS,lineterminator="\\n"); writer.writeheader(); writer.writerows(results)
     return {"rows":len(results),"statuses":{s:sum(x["deletion_status"]==s for x in results) for s in sorted(STATUSES)},"output":str(output)}
+
 
 def main()->int:
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset",type=Path,default=Path("dataset")); p.add_argument("--output",type=Path,default=Path("output.csv"))
-    p.add_argument("--validate-only",action="store_true"); args=p.parse_args()
+    p.add_argument("--validate-only",action="store_true"); p.add_argument("--requests",type=Path,default=None,help="Optional request CSV for sample evaluation"); args=p.parse_args()
     try:
-        data=load_inputs(args.dataset)
+        data=load_inputs(args.dataset,args.requests)
         if args.validate_only: print(json.dumps({"valid":True,"requests":len(data["requests"]),"identities":len(data["identities"]),"audit_rows":len(data["audit"]),"activity_rows":len(data["activity"]),"evidence_manifest_rows":len(data["manifest"])}))
-        else: print(json.dumps(generate(args.dataset,args.output),ensure_ascii=False))
+        else: print(json.dumps(generate(args.dataset,args.output,args.requests),ensure_ascii=False))
     except (InputError,OSError) as e: print(f"ghosttrace: error: {e}",file=sys.stderr); return 2
     return 0
 if __name__=="__main__": raise SystemExit(main())

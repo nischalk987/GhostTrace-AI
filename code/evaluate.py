@@ -76,17 +76,16 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as td:
             overlay = Path(td) / "dataset"
             overlay.mkdir()
-            for path in args.dataset.iterdir():
-                dest = overlay / path.name
-                if path.name == "deletion_requests.csv":
-                    dest.write_bytes(requests_path.read_bytes())
-                elif path.is_file():
-                    dest.write_bytes(path.read_bytes())
-                elif path.is_dir():
-                    shutil.copytree(path, dest)
+            # Run against the provided sample requests without replacing the production
+            # dataset file or copying the evidence tree into a temporary directory.
             output = Path(td) / "sample_output.csv"
             engine = Path(__file__).with_name("main.py")
-            subprocess.run([sys.executable, str(engine), "--dataset", str(overlay), "--output", str(output)], check=True)
+            subprocess.run([
+                sys.executable, str(engine),
+                "--dataset", str(args.dataset),
+                "--requests", str(requests_path),
+                "--output", str(output),
+            ], check=True)
             metrics = score(read_rows(output), read_rows(reference_path))
             print(json.dumps(metrics, indent=2))
             if metrics["case_status_accuracy"] != 1 or metrics["exact_step_array_accuracy"] != 1:

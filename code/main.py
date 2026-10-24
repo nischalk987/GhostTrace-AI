@@ -840,6 +840,6 @@ def main()->int:
         data=load_inputs(args.dataset,args.requests)
         if args.validate_only: print(json.dumps({"valid":True,"requests":len(data["requests"]),"identities":len(data["identities"]),"audit_rows":len(data["audit"]),"activity_rows":len(data["activity"]),"evidence_manifest_rows":len(data["manifest"])}))
         else: print(json.dumps(generate(args.dataset,args.output,args.requests),ensure_ascii=False))
-    except (InputError,OSError) as e: print(f"ghosttrace: error: {e}",file=sys.stderr); return 2
+    except (InputError,OSError,ValueError) as e: print(f"ghosttrace: error: {e}",file=sys.stderr); return 2
     return 0
 if __name__=="__main__": raise SystemExit(main())

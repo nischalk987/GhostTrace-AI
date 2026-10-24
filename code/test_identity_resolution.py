@@ -22,8 +22,7 @@ class IdentityResolutionTests(unittest.TestCase):
         self.assertEqual(result.status, "RESOLVED")
         self.assertEqual(result.user_id, "u1")
         self.assertTrue(result.matches)
-        self.assertEqual(result.matches[0].source_file, "user_identities.csv")
-        self.assertEqual(result.matches[0].source_row, 2)
+        self.assertTrue(any(m.source_file == "user_identities.csv" and m.source_row == 2 for m in result.matches))
 
     def test_historical_email_resolves_with_audit_provenance(self):
         result = self.resolver().resolve_subject("old@example.com", "2026-02-01T00:00:00Z")

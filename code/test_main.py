@@ -156,6 +156,78 @@ class EngineRegressionTests(unittest.TestCase):
                                        {"a@example.com"}, cutoff=parse_time("2026-01-02T00:00:00Z"))
         self.assertTrue(any(r.resource_id == "search_1" for r in resources))
 
+
+
+    def test_policy_rules_loaded_and_validated_at_input_load(self):
+        from main import validate_policy_inputs
+        rules = [
+            {"rule_id":"r1","data_category":"USER_PROFILE","condition":"Always","required_action":"DELETE"}
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "deletion_rules.csv").write_text(
+                "rule_id,data_category,condition,required_action\nr1,USER_PROFILE,Always,DELETE\n",
+                encoding="utf-8"
+            )
+            validate_policy_inputs(root, rules)
+            with self.assertRaises(InputError):
+                validate_policy_inputs(root, rules + rules)
+
+    def test_build_plan_does_not_delete_retained_security_or_backup_records(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rules.csv"
+            p.write_text(
+                "rule_id,data_category,condition,required_action\n"
+                "rsec,SECURITY_AUDIT_LOG,Record is within the supplied retention period,RETAIN\n"
+                "rbackup,BACKUP_ARCHIVE,Restore access can be blocked,RETAIN\n",
+                encoding="utf-8"
+            )
+            resources = [
+                Resource("security_service", "audit_record_1", "REPORT_REMAINING_RECORD", "PRESENT", "ev1"),
+                Resource("backup_service", "backup_1", "REPORT_REMAINING_RECORD", "PRESENT", "ev2"),
+                Resource("search_service", "search_1", "REPORT_REMAINING_RECORD", "PRESENT", "ev3"),
+            ]
+            plan = build_plan(resources, policy_path=p)
+            finding_ids = {(x["system_id"], x["resource_id"]) for x in plan if x["phase"] == "FINDING"}
+            self.assertNotIn(("security_service", "audit_record_1"), finding_ids)
+            self.assertNotIn(("backup_service", "backup_1"), finding_ids)
+            self.assertIn(("search_service", "search_1"), finding_ids)
+            self.assertTrue(any(x["operation"] == "DELETE_RECORD" and x["resource_id"] == "search_1" for x in plan))
+
+    def test_tombstone_direct_identifiers_are_not_treated_as_safe_redaction(self):
+        from deletion_policy import DeletionPolicy
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rules.csv"
+            p.write_text(
+                "rule_id,data_category,condition,required_action\n"
+                "r1,ACCOUNT_TOMBSTONE,Account is deleted and only a stable internal user_id is needed to preserve references to retained records,REDACT\n",
+                encoding="utf-8"
+            )
+            policy = DeletionPolicy.from_csv(p)
+            record = {
+                "resource_id":"tombstone_1", "user_id":"u1",
+                "account_deleted":True, "stable_user_id_required":True,
+                "email":"still-visible@example.com",
+            }
+            decision = evaluate_record_policy(record, "evidence/tombstone.json", "", "tombstone_1", policy)
+            self.assertEqual(decision.action, "UNRESOLVED")
+            self.assertIn("TOMBSTONE_REDACTION_REQUIRED", decision.diagnostics)
+
+    def test_legal_hold_record_is_retained_when_active_hold_is_explicit(self):
+        from deletion_policy import DeletionPolicy
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "rules.csv"
+            p.write_text(
+                "rule_id,data_category,condition,required_action\nr1,LEGAL_HOLD_RECORD,A supplied legal hold is active,RETAIN\n",
+                encoding="utf-8"
+            )
+            policy = DeletionPolicy.from_csv(p)
+            decision = policy.decide("LEGAL_HOLD_RECORD", {"legal_hold_active": True})
+            self.assertEqual(decision.action, "RETAIN")
+            self.assertFalse(decision.safe_to_delete)
+
+
     def test_output_rejects_invalid_status(self):
         with self.assertRaises(InputError):
             validate_output([{"case_id":"case_1","deletion_status":"UNKNOWN","steps_json":"[]"}], {"case_1"})

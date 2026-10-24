@@ -718,11 +718,21 @@ def build_plan(resources:list[Resource],policy_path:Path|None=None)->list[dict[s
         filtered = []
         for resource in unique:
             category = record_policy_category("", resource.system_id, "", resource.resource_id)
-            # A retention-oriented system/category is never turned into a delete
-            # remediation merely because a generic residual-record detector fired.
+            # Evaluate the actual resource class. If the conditional protection rule is
+            # unresolved, keep the conservative FINDING but never propose DELETE.
             if category in {"SECURITY_AUDIT_LOG", "LEGAL_HOLD_RECORD", "BACKUP_ARCHIVE"}:
-                decision = policy.decide(category, {})
-                if decision.action in {"RETAIN", "UNRESOLVED"}:
+                context: dict[str, Any] = {}
+                if category == "SECURITY_AUDIT_LOG":
+                    # A generic audit-record label alone does not prove retention is active.
+                    context = {"within_retention_period": True} if "retained" in resource.operation.casefold() else {}
+                if category == "LEGAL_HOLD_RECORD":
+                    # Active-hold context must come from explicit evidence, never category alone.
+                    context = {}
+                decision = policy.decide(category, context)
+                if decision.action == "RETAIN":
+                    continue
+                if decision.action == "UNRESOLVED":
+                    # Exclude from this destructive plan until policy facts are resolved.
                     continue
             filtered.append(resource)
         unique = filtered

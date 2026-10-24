@@ -338,6 +338,11 @@ def _resource_observation_time(record: dict[str, Any], captured_at: datetime) ->
     return normalize_timestamp(captured_at)
 
 
+def _policy_truth(value: Any) -> bool:
+    """Interpret explicit boolean-like policy facts without relying on another module's internals."""
+    return value is True or str(value).strip().casefold() in {"1", "true", "yes", "active", "enabled"}
+
+
 def _policy_context(record: Mapping[str, Any], category: str, capture_path: str = "") -> dict[str, Any]:
     """Derive only explicit facts needed by policy conditions; do not infer missing truth."""
     fields = {str(k).casefold(): v for k, v in record.items()}
@@ -396,11 +401,11 @@ def _policy_context(record: Mapping[str, Any], category: str, capture_path: str 
         deleted_keys = ("account_deleted", "deleted_account", "deletion_confirmed")
         stable_keys = ("stable_user_id_required", "stable_reference_required", "retained_record_references")
         if any(key in fields for key in deleted_keys):
-            context["account_deleted"] = any(_truth(fields[key]) for key in deleted_keys if key in fields)
+            context["account_deleted"] = any(_policy_truth(fields[key]) for key in deleted_keys if key in fields)
         elif any(token in text for token in ("account_deleted=true", "deletion_confirmed=true", "deleted_account=true", "account is deleted")):
             context["account_deleted"] = True
         if any(key in fields for key in stable_keys):
-            context["stable_user_id_required"] = any(_truth(fields[key]) for key in stable_keys if key in fields)
+            context["stable_user_id_required"] = any(_policy_truth(fields[key]) for key in stable_keys if key in fields)
         elif any(token in text for token in ("stable_user_id_required=true", "stable reference required", "preserve references to retained records")):
             context["stable_user_id_required"] = True
         # Direct identifiers must be checked against real values, not just field names.

@@ -11,6 +11,11 @@ from main import (
 class AuditEngineRegressionTests(unittest.TestCase):
     def test_intent_negation_and_non_deletion(self):
         self.assertTrue(request_authorizes_deletion("Please permanently delete my account."))
+        self.assertTrue(request_authorizes_deletion("Je demande la suppression définitive du compte."))
+        self.assertTrue(request_authorizes_deletion("このアカウントの完全な削除を依頼します。"))
+        self.assertTrue(request_authorizes_deletion("I was told the account had been deleted."))
+        self.assertTrue(request_authorizes_deletion("Close this account permanently."))
+        self.assertTrue(request_authorizes_deletion("Can you verify my account was deleted? Do not treat the similar search record as mine."))
         self.assertFalse(request_authorizes_deletion("Please export my data."))
         self.assertFalse(request_authorizes_deletion("Do not delete my account."))
 
@@ -42,6 +47,12 @@ class AuditEngineRegressionTests(unittest.TestCase):
             {"resource_id":"analytics_9","record_json":json.dumps({"resource_id":"analytics_9","email":"a@b.com"})}
         ]}))
         self.assertTrue(any(row.get("email") == "a@b.com" for row, _, _ in rows))
+
+    def test_nested_subject_inherits_parent_resource_id(self):
+        rows = list(_walk_records({"resource_id":"search_9","hits":{"documents":[
+            {"email":"a@b.com","display_name":"A"}
+        ]}}))
+        self.assertTrue(any(row.get("resource_id")=="search_9" and row.get("email")=="a@b.com" for row, _, _ in rows))
 
     def test_build_plan_has_phase_order_and_empty_future_evidence(self):
         plan = build_plan([

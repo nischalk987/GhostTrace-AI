@@ -309,7 +309,19 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                 if len(columns) != len(values):
                     continue
                 rec = dict(zip((c.casefold() for c in columns), (v.strip().strip("'\\\"") for v in values)))
-                if not _contains_subject(rec, aliases, tokens, users):
+                # Newer replicas serialize the original customer record inside a SQL
+                # text column. Unpack that payload before exact identity matching.
+                for payload_key in ("record_json", "payload", "document"):
+                    payload = rec.get(payload_key)
+                    if not payload:
+                        continue
+                    try:
+                        nested = json.loads(payload)
+                    except (json.JSONDecodeError, TypeError):
+                        nested = None
+                    if isinstance(nested, dict):
+                        rec = {**rec, **{str(k).casefold(): v for k, v in nested.items()}}
+                if not (_contains_subject(rec, aliases, tokens, users) or _record_matches(rec, aliases, users)):
                     continue
                 rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
                 if not rid:

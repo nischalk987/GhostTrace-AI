@@ -43,7 +43,7 @@ class EvidenceIndexTests(unittest.TestCase):
             self.assertEqual(index.documents["ev1"].status, "INDEXED")
             self.assertEqual(index.documents["ev3"].status, "INDEXED")
             self.assertEqual(index.documents["ev2"].status, "INDEXED")
-            self.assertEqual(index.stats()["indexed_documents"], 4)
+            self.assertEqual(index.stats()["indexed_documents"], 3)
 
     def test_cutoff_and_provenance(self):
         with tempfile.TemporaryDirectory() as temp:

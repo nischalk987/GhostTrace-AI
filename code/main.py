@@ -365,16 +365,34 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                         else:
                             continue
                     elif category == "flow":
-                        enabled = str(fields.get("enabled", fields.get("status", ""))).casefold()
+                        enabled = str(fields.get("enabled", fields.get("status", fields.get("state", "")))).casefold()
+                        sysid = str(rec.get("system_id") or store or "integration_service")
                         if enabled in {"true", "1", "enabled", "active", "running"}:
-                            op, state, sysid = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE", str(rec.get("system_id") or store or "integration_service")
+                            op, state = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE"
                         else:
+                            resource_state = _temporal_resource_state(rec, category)
+                            if resource_state:
+                                observed_at = _resource_observation_time(rec, hit.captured_at)
+                                temporal_events.setdefault((sysid, rid), []).append(TemporalEvent(
+                                    f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                                    hit.file_id, hit.path, "SUPPORTED",
+                                    f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                                ))
                             continue
                     elif category == "backup":
                         restorable = str(fields.get("restorable", fields.get("restore_allowed", fields.get("status", "")))).casefold()
+                        sysid = str(rec.get("system_id") or store or "backup_service")
                         if restorable in {"true", "1", "yes", "restorable", "enabled", "active"}:
-                            op, state, sysid = "REPORT_RESTORE_RISK", "ACTIVE", str(rec.get("system_id") or store or "backup_service")
+                            op, state = "REPORT_RESTORE_RISK", "ACTIVE"
                         else:
+                            resource_state = _temporal_resource_state(rec, category)
+                            if resource_state:
+                                observed_at = _resource_observation_time(rec, hit.captured_at)
+                                temporal_events.setdefault((sysid, rid), []).append(TemporalEvent(
+                                    f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                                    hit.file_id, hit.path, "SUPPORTED",
+                                    f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                                ))
                             continue
                     elif category == "analytics":
                         op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", str(rec.get("data_store") or store or "analytics_platform")
@@ -437,6 +455,10 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                         nested = None
                     if isinstance(nested, dict):
                         rec = {**rec, **{str(k).casefold(): v for k, v in nested.items()}}
+                if cutoff is not None:
+                    eligible, _temporal_reason = observation_is_eligible(rec, captured_at=hit.captured_at, audit_at=cutoff)
+                    if not eligible:
+                        continue
                 if not (_contains_subject(rec, aliases, tokens, users) or _record_matches(rec, aliases, users)):
                     continue
                 rid = str(rec.get("resource_id") or rec.get("record_id") or rec.get("id") or "")
@@ -452,6 +474,34 @@ def classify_resources(hits:list[EvidenceHit],users:set[str],aliases:set[str],to
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "identity_service"
                 elif category == "analytics":
                     op, state, sysid = "REPORT_EXPOSED_PII", "PRESENT", "analytics_platform"
+                elif category == "flow":
+                    sysid = infer_system(path, rid)
+                    resource_state = _temporal_resource_state(rec, category)
+                    if resource_state == "ACTIVE":
+                        op, state = "REPORT_ACTIVE_DATA_FLOW", "ACTIVE"
+                    else:
+                        if resource_state:
+                            observed_at = _resource_observation_time(rec, hit.captured_at)
+                            temporal_events.setdefault((sysid, rid), []).append(TemporalEvent(
+                                f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                                hit.file_id, hit.path, "SUPPORTED",
+                                f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                            ))
+                        continue
+                elif category == "backup":
+                    sysid = infer_system(path, rid)
+                    resource_state = _temporal_resource_state(rec, category)
+                    if resource_state == "ACTIVE":
+                        op, state = "REPORT_RESTORE_RISK", "ACTIVE"
+                    else:
+                        if resource_state:
+                            observed_at = _resource_observation_time(rec, hit.captured_at)
+                            temporal_events.setdefault((sysid, rid), []).append(TemporalEvent(
+                                f"{sysid}:{rid}", observed_at, resource_state, "RESOURCE_OBSERVATION",
+                                hit.file_id, hit.path, "SUPPORTED",
+                                f"Observed {resource_state} in {hit.file_id} at {observed_at.isoformat()}",
+                            ))
+                        continue
                 else:
                     op, state, sysid = "REPORT_REMAINING_RECORD", "PRESENT", infer_system(path, rid)
                 key = (sysid, rid, op)

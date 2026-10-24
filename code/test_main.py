@@ -57,10 +57,10 @@ class EngineRegressionTests(unittest.TestCase):
             (dataset / "evidence" / "records" / "sample.json").write_text(
                 '{"resource_id":"search_1","email":"a@example.com"}', encoding="utf-8")
             (dataset / "evidence_files.csv").write_text(
-                "file_id,file_path,origin,captured_at\\n"
-                "ev1,evidence/records/sample.json,manifest-hint,2026-01-01T00:00:00Z\\n"
-                "ev2,../outside.json,manifest-hint,2026-01-01T00:00:00Z\\n"
-                "ev3,evidence/records/missing.json,manifest-hint,2026-01-01T00:00:00Z\\n",
+                "file_id,file_path,origin,captured_at\n"
+                "ev1,evidence/records/sample.json,manifest-hint,2026-01-01T00:00:00Z\n"
+                "ev2,../outside.json,manifest-hint,2026-01-01T00:00:00Z\n"
+                "ev3,evidence/records/missing.json,manifest-hint,2026-01-01T00:00:00Z\n",
                 encoding="utf-8")
             index = EvidenceIndex(dataset).build()
             self.assertTrue(index.query_subject("email", "a@example.com"))

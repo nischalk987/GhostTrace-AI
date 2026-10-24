@@ -410,6 +410,24 @@ def audit_case(case:dict[str,str],data:dict[str,Any],dataset:Path,evidence_cache
     # have enough information to assert COMPLETE by itself.
     return "INCOMPLETE", plan
 
+def _validate_steps(steps: list[dict[str, Any]], case_id: str) -> None:
+    phase_order = {"FINDING": 0, "REMEDIATION": 1, "VERIFICATION": 2}
+    last_phase = -1
+    for i, step in enumerate(steps, 1):
+        if not isinstance(step, dict) or list(step) != STEP_FIELDS:
+            raise InputError(f"Invalid step schema for {case_id} at position {i}")
+        if step["step_no"] != i:
+            raise InputError(f"Invalid step numbering for {case_id}")
+        if (step["phase"], step["operation"], step["state"]) not in ALLOWED:
+            raise InputError(f"Invalid operation/state for {case_id}: {step}")
+        rank = phase_order[step["phase"]]
+        if rank < last_phase:
+            raise InputError(f"Invalid phase order for {case_id}")
+        last_phase = rank
+        if step["phase"] == "FINDING" and not step["evidence_id"]:
+            raise InputError(f"Finding must cite evidence for {case_id}")
+        if step["phase"] != "FINDING" and step["evidence_id"]:
+            raise InputError(f"Proposed future action must not cite existing evidence for {case_id}")
 def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
     if not rows or list(rows[0])!=OUTPUT_FIELDS: raise InputError("Output header mismatch")
     ids=[r["case_id"] for r in rows]
@@ -421,11 +439,8 @@ def validate_output(rows:list[dict[str,str]],expected:set[str])->None:
         except json.JSONDecodeError as e: raise InputError(f"Invalid JSON for {row['case_id']}") from e
         if not isinstance(steps,list): raise InputError("steps_json must be a JSON array")
         if row["deletion_status"]=="NOT_APPLICABLE" and steps: raise InputError("NOT_APPLICABLE must have []")
-        if row["deletion_status"]=="COMPLETE" and any(s["phase"]!="VERIFICATION" or not s["evidence_id"] for s in steps): raise InputError("COMPLETE requires evidence-backed verification-only steps")
-        for i,s in enumerate(steps,1):
-            if list(s)!=STEP_FIELDS or s["step_no"]!=i: raise InputError("Invalid step fields/numbering")
-            if (s["phase"],s["operation"],s["state"]) not in ALLOWED: raise InputError("Invalid operation/state")
-            if s["phase"]=="FINDING" and not s["evidence_id"]: raise InputError("Finding must cite evidence")
+        if row["deletion_status"]=="COMPLETE" and (not steps or any(s["phase"]!="VERIFICATION" or not s["evidence_id"] for s in steps)): raise InputError("COMPLETE requires non-empty, evidence-backed verification-only steps")
+        _validate_steps(steps, row["case_id"])
 
 def generate(dataset:Path,output:Path,requests_file:Path|None=None)->dict[str,Any]:
     data=load_inputs(dataset,requests_file); results=[]
